@@ -27,10 +27,11 @@ Usage:
 import torch
 import torchaudio
 import torchaudio.transforms as T
+import torchaudio.functional as AF
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, random_split, Subset
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -65,17 +66,27 @@ class SpeechEmotionDataset(Dataset):
         labels_csv : path to CSV with columns [clip_id, emotion]
         transform  : torchaudio MelSpectrogram transform
         max_frames : fixed spectrogram length along the time axis
-        mean       : (1, n_mels, 1) tensor for normalisation — computed on train
-        std        : (1, n_mels, 1) tensor for normalisation — computed on train
+        mean       : (channels, n_mels, 1) tensor for normalisation
+        std        : (channels, n_mels, 1) tensor for normalisation
     """
 
     def __init__(self, audio_dir, labels_csv, transform,
-                 max_frames=MAX_FRAMES, mean=None, std=None):
+                 max_frames=MAX_FRAMES, mean=None, std=None,
+                 include_deltas=False, apply_specaugment=False,
+                 num_time_masks=2, time_mask_param=24,
+                 num_freq_masks=2, freq_mask_param=8):
         self.audio_dir  = Path(audio_dir)
         self.transform  = transform
         self.max_frames = max_frames
         self.mean       = mean
         self.std        = std
+        self.include_deltas = include_deltas
+        self.apply_specaugment = apply_specaugment
+        self.num_time_masks = num_time_masks
+        self.num_freq_masks = num_freq_masks
+        self.to_db = T.AmplitudeToDB()
+        self.time_mask = T.TimeMasking(time_mask_param=time_mask_param)
+        self.freq_mask = T.FrequencyMasking(freq_mask_param=freq_mask_param)
 
         df = pd.read_csv(labels_csv)
         df["label"] = df["emotion"].map(EMOTION_LABELS)
@@ -108,7 +119,7 @@ class SpeechEmotionDataset(Dataset):
         spec = self.transform(waveform)
 
         # Log compression
-        spec = T.AmplitudeToDB()(spec)
+        spec = self.to_db(spec)
 
         # Pad or truncate to max_frames
         n_frames = spec.shape[-1]
@@ -117,31 +128,45 @@ class SpeechEmotionDataset(Dataset):
         else:
             spec = spec[..., :self.max_frames]
 
+        if self.include_deltas:
+            delta = AF.compute_deltas(spec)
+            delta2 = AF.compute_deltas(delta)
+            spec = torch.cat([spec, delta, delta2], dim=0)
+
         # Normalise
         if self.mean is not None and self.std is not None:
             spec = (spec - self.mean) / (self.std + 1e-8)
+
+        if self.apply_specaugment:
+            for _ in range(self.num_freq_masks):
+                spec = self.freq_mask(spec)
+            for _ in range(self.num_time_masks):
+                spec = self.time_mask(spec)
 
         return spec, label
 
 
 # ── Normalisation ──────────────────────────────────────────────────────────────
 def compute_mean_std(dataset):
-    """Compute per-mel-bin mean and std over a dataset.
+    """Compute per-channel, per-mel-bin mean and std over a dataset.
 
-    Returns tensors of shape (1, n_mels, 1) suitable for broadcasting.
+    Returns tensors of shape (channels, n_mels, 1) suitable for broadcasting.
     """
     print("Computing normalisation statistics from training set...")
     all_specs = [dataset[i][0] for i in range(len(dataset))]
-    stacked   = torch.stack(all_specs, dim=0)          # (N, 1, n_mels, T)
-    mean      = stacked.mean(dim=(0, 3), keepdim=True).squeeze(0)   # (1, n_mels, 1)
-    std       = stacked.std(dim=(0, 3),  keepdim=True).squeeze(0)   # (1, n_mels, 1)
+    stacked   = torch.stack(all_specs, dim=0)          # (N, C, n_mels, T)
+    mean      = stacked.mean(dim=(0, 3), keepdim=True).squeeze(0)   # (C, n_mels, 1)
+    std       = stacked.std(dim=(0, 3),  keepdim=True).squeeze(0)   # (C, n_mels, 1)
     print(f"  Done. Mean range: [{mean.min():.2f}, {mean.max():.2f}]")
     return mean, std
 
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
-                    num_workers=0, max_frames=MAX_FRAMES, random_seed=42):
+                    num_workers=0, max_frames=MAX_FRAMES, random_seed=42,
+                    include_deltas=False, apply_specaugment=False,
+                    num_time_masks=2, time_mask_param=24,
+                    num_freq_masks=2, freq_mask_param=8):
     """Build DataLoaders for train, validation, and test splits.
 
     The training set is split into train and validation subsets using
@@ -175,6 +200,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         labels_csv = train_dir / "train_labels.csv",
         transform  = mel_transform,
         max_frames = max_frames,
+        include_deltas = include_deltas,
     )
 
     # Train / validation split
@@ -186,21 +212,15 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     train_subset, val_subset = random_split(
         full_train_raw, [n_train, n_val], generator=generator
     )
+    train_indices = train_subset.indices
+    val_indices = val_subset.indices
 
     # Compute normalisation statistics on the training portion only
-    # Build a temporary dataset of just the training indices
-    train_only = SpeechEmotionDataset(
-        audio_dir  = train_dir / "audio",
-        labels_csv = train_dir / "train_labels.csv",
-        transform  = mel_transform,
-        max_frames = max_frames,
-    )
-    # Subset to training indices for stats computation
-    train_indices = train_subset.indices
-    train_stats_dataset = torch.utils.data.Subset(train_only, train_indices)
+    train_stats_dataset = Subset(full_train_raw, train_indices)
     mean, std = compute_mean_std(train_stats_dataset)
 
-    # Rebuild all three splits with normalisation applied
+    # Rebuild train/validation splits with shared mean/std.
+    # SpecAugment is applied only on the training split.
     train_dataset = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
         labels_csv = train_dir / "train_labels.csv",
@@ -208,10 +228,24 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         max_frames = max_frames,
         mean       = mean,
         std        = std,
+        include_deltas = include_deltas,
+        apply_specaugment = apply_specaugment,
+        num_time_masks = num_time_masks,
+        time_mask_param = time_mask_param,
+        num_freq_masks = num_freq_masks,
+        freq_mask_param = freq_mask_param,
     )
-    train_final, val_final = random_split(
-        train_dataset, [n_train, n_val], generator=generator
+    val_dataset = SpeechEmotionDataset(
+        audio_dir  = train_dir / "audio",
+        labels_csv = train_dir / "train_labels.csv",
+        transform  = mel_transform,
+        max_frames = max_frames,
+        mean       = mean,
+        std        = std,
+        include_deltas = include_deltas,
     )
+    train_final = Subset(train_dataset, train_indices)
+    val_final = Subset(val_dataset, val_indices)
 
     test_dataset = SpeechEmotionDataset(
         audio_dir  = test_dir / "audio",
@@ -220,6 +254,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         max_frames = max_frames,
         mean       = mean,
         std        = std,
+        include_deltas = include_deltas,
     )
 
     train_loader = DataLoader(
@@ -239,6 +274,13 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     print(f"  Train:      {n_train:>5} clips")
     print(f"  Validation: {n_val:>5} clips  ({val_split*100:.0f}% of train)")
     print(f"  Test:       {len(test_dataset):>5} clips")
-    print(f"\nSpectrogram shape: (1, {N_MELS}, {max_frames})")
+    n_channels = 3 if include_deltas else 1
+    print(f"\nSpectrogram shape: ({n_channels}, {N_MELS}, {max_frames})")
+    if apply_specaugment:
+        print(
+            "SpecAugment (train only): "
+            f"time_masks={num_time_masks}, time_param={time_mask_param}, "
+            f"freq_masks={num_freq_masks}, freq_param={freq_mask_param}"
+        )
 
     return train_loader, val_loader, test_loader, mean, std

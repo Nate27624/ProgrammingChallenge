@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 
-from dataloader import get_dataloaders
+from dataloader import get_dataloaders, N_MELS
 from baseline import BaselineLSTM
 
 
@@ -43,6 +43,12 @@ CONFIG = {
     "patience":      10,      # early stopping patience (epochs)
     "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
     "val_split":     0.15,
+    "include_deltas": False,
+    "specaugment": False,
+    "num_time_masks": 2,
+    "time_mask_param": 24,
+    "num_freq_masks": 2,
+    "freq_mask_param": 8,
 }
 
 
@@ -136,6 +142,14 @@ def plot_curves(train_losses, val_losses, train_accs, val_accs,
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main(args):
+    config = CONFIG.copy()
+    config["include_deltas"] = args.include_deltas
+    config["specaugment"] = args.specaugment
+    config["num_time_masks"] = args.num_time_masks
+    config["time_mask_param"] = args.time_mask_param
+    config["num_freq_masks"] = args.num_freq_masks
+    config["freq_mask_param"] = args.freq_mask_param
+
     output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,13 +164,24 @@ def main(args):
     print("\nLoading data...")
     train_loader, val_loader, _, mean, std = get_dataloaders(
         data_dir   = args.data_dir,
-        val_split  = CONFIG["val_split"],
-        batch_size = CONFIG["batch_size"],
+        val_split  = config["val_split"],
+        batch_size = config["batch_size"],
+        include_deltas = config["include_deltas"],
+        apply_specaugment = config["specaugment"],
+        num_time_masks = config["num_time_masks"],
+        time_mask_param = config["time_mask_param"],
+        num_freq_masks = config["num_freq_masks"],
+        freq_mask_param = config["freq_mask_param"],
     )
-    torch.save({"mean": mean, "std": std}, norm_stats_path)
+    torch.save(
+        {"mean": mean, "std": std, "include_deltas": config["include_deltas"]},
+        norm_stats_path
+    )
 
     # ── Model, optimiser, scheduler ───────────────────────────────────────────
+    input_size = N_MELS * (3 if config["include_deltas"] else 1)
     model = BaselineLSTM(
+        input_size = input_size,
         hidden_size = CONFIG["hidden_size"],
         num_layers  = CONFIG["num_layers"],
         dropout     = CONFIG["dropout"],
@@ -206,7 +231,7 @@ def main(args):
     wandb.init(
         project = "CSE 5526 - Programming Challenge",
         name    = run_name,
-        config  = CONFIG,
+        config  = config,
         id      = wandb_id,
         resume  = "allow",
     )
@@ -324,5 +349,39 @@ if __name__ == "__main__":
         type=str,
         default='baseline_train',
         help="Optional wandb run name (default: auto-generated from config)",
+    )
+    parser.add_argument(
+        "--include_deltas",
+        action="store_true",
+        help="Use delta + delta-delta channels (3x64 features per frame).",
+    )
+    parser.add_argument(
+        "--specaugment",
+        action="store_true",
+        help="Apply SpecAugment to train split only.",
+    )
+    parser.add_argument(
+        "--num_time_masks",
+        type=int,
+        default=2,
+        help="Number of time masks for SpecAugment (default: 2).",
+    )
+    parser.add_argument(
+        "--time_mask_param",
+        type=int,
+        default=24,
+        help="Maximum width for each time mask (default: 24).",
+    )
+    parser.add_argument(
+        "--num_freq_masks",
+        type=int,
+        default=2,
+        help="Number of frequency masks for SpecAugment (default: 2).",
+    )
+    parser.add_argument(
+        "--freq_mask_param",
+        type=int,
+        default=8,
+        help="Maximum width for each frequency mask (default: 8).",
     )
     main(parser.parse_args())

@@ -73,8 +73,21 @@ class BaselineLSTM(nn.Module):
         Returns:
             logits : (batch, num_classes)
         """
-        # (batch, 1, n_mels, max_frames) -> (batch, max_frames, n_mels)
-        x = x.squeeze(1).transpose(1, 2)
+        if x.ndim != 4:
+            raise ValueError(
+                f"Expected 4D input (batch, channels, n_mels, time), got {x.shape}"
+            )
+
+        # (batch, channels, n_mels, time) -> (batch, time, channels * n_mels)
+        bsz, channels, n_mels, time_steps = x.shape
+        x = x.permute(0, 3, 1, 2).contiguous().view(
+            bsz, time_steps, channels * n_mels
+        )
+        if x.shape[-1] != self.input_size:
+            raise ValueError(
+                f"LSTM input mismatch: got {x.shape[-1]} features per frame, "
+                f"expected {self.input_size}. Check include_deltas setting."
+            )
 
         # LSTM: (batch, max_frames, n_mels) -> (batch, max_frames, hidden_size)
         lstm_out, _ = self.lstm(x)

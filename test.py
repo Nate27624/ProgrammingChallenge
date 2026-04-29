@@ -146,6 +146,7 @@ def main(args):
     # Load normalisation statistics saved by train.py
     stats     = torch.load(stats_path, map_location="cpu")
     mean, std = stats["mean"], stats["std"]
+    include_deltas = bool(stats.get("include_deltas", False))
 
     # Locate labels CSV inside the test directory
     test_dir  = Path(args.test_dir)
@@ -170,6 +171,7 @@ def main(args):
         max_frames = MAX_FRAMES,
         mean       = mean,
         std        = std,
+        include_deltas = include_deltas,
     )
     test_loader = DataLoader(
         test_dataset, batch_size=64, shuffle=False, num_workers=0
@@ -177,7 +179,8 @@ def main(args):
     print(f"Test clips     : {len(test_dataset)}")
 
     # Load model
-    model = BaselineLSTM().to(device)
+    input_size = N_MELS * (3 if include_deltas else 1)
+    model = BaselineLSTM(input_size=input_size).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     print(f"Model loaded from : {model_path}")
 
