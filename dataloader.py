@@ -105,7 +105,13 @@ class SpeechEmotionDataset(Dataset):
         clip_id, label = self.samples[idx]
         wav_path = self.audio_dir / f"{clip_id}.wav"
 
-        waveform, sr = torchaudio.load(wav_path)
+        import soundfile as sf
+        import numpy as np
+        waveform_np, sr = sf.read(str(wav_path), dtype='float32')
+        if waveform_np.ndim == 1:
+            waveform_np = np.expand_dims(waveform_np, axis=1) # (frames, 1)
+        waveform_np = waveform_np.transpose() # (channels, frames)
+        waveform = torch.from_numpy(waveform_np)
 
         # Resample if needed
         if sr != SAMPLE_RATE:
