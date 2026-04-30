@@ -1,0 +1,68 @@
+{
+  "os":  "Windows-11-10.0.26200-SP0",
+  "python":  "CPython 3.13.13",
+  "startedAt":  "2026-04-30T00:56:11.129372Z",
+  "args":  [
+    "--data_dir",
+    "dataset",
+    "--results_dir",
+    "results",
+    "--team_name",
+    "mamba_phase2",
+    "--run_name",
+    "mamba_phase2",
+    "--model_name",
+    "mamba",
+    "--feature_type",
+    "mfcc",
+    "--include_deltas",
+    "--specaugment",
+    "--num_epochs",
+    "100",
+    "--batch_size",
+    "64",
+    "--learning_rate",
+    "3e-4",
+    "--mamba_d_state",
+    "32",
+    "--mamba_expand",
+    "2",
+    "--cnn_channels",
+    "64"
+  ],
+  "program":  "D:\\School\\CSE 5526\\ProgrammingChallenge\\TestSetup\\ProgrammingChallenge\\train.py",
+  "codePath":  "train.py",
+  "codePathLocal":  "train.py",
+  "git":  {
+    "remote":  "https://github.com/Nate27624/ProgrammingChallenge.git",
+    "commit":  "9f49b35b64b92feaf030815cef6623bd19836fc0"
+  },
+  "email":  "arens.32@buckeyemail.osu.edu",
+  "root":  "D:\\School\\CSE 5526\\ProgrammingChallenge\\TestSetup\\ProgrammingChallenge",
+  "host":  "NATES-SERVERMACHINE",
+  "executable":  "C:\\Users\\diggy\\AppData\\Local\\Microsoft\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\python.exe",
+  "cpu_count":  8,
+  "cpu_count_logical":  16,
+  "gpu":  "NVIDIA GeForce RTX 5080",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "786430947328",
+      "used":  "729563480064"
+    }
+  },
+  "memory":  {
+    "total":  "33513934848"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 5080",
+      "memoryTotal":  "17094934528",
+      "cudaCores":  10752,
+      "architecture":  "Blackwell",
+      "uuid":  "GPU-f490488f-f247-20fe-f285-974762ee8431"
+    }
+  ],
+  "cudaVersion":  "12.9",
+  "writerId":  "r5uncc0ycllg83phvbfbxi7mkk5enhzb"
+}
