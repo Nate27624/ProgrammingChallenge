@@ -391,7 +391,7 @@ def sample_stage_a_config(
     weight_decay = trial.suggest_categorical("weight_decay", [1e-4])
     label_smoothing = trial.suggest_categorical("label_smoothing", [0.05])
     learning_rate = trial.suggest_categorical("learning_rate", [3e-4])
-    batch_size = trial.suggest_categorical("batch_size", [64])
+    batch_size = trial.suggest_categorical("batch_size", [args.stage_a_batch_size])
     num_time_masks = trial.suggest_categorical("num_time_masks", [2])
     time_mask_param = trial.suggest_categorical("time_mask_param", [24])
     num_freq_masks = trial.suggest_categorical("num_freq_masks", [2])
@@ -628,6 +628,12 @@ def main():
         type=int,
         default=2,
         help="How many random-seed repeats per architecture in stage_a.",
+    )
+    parser.add_argument(
+        "--stage_a_batch_size",
+        type=int,
+        default=32,
+        help="Fixed batch size for stage_a architecture shortlist (default: 32).",
     )
     parser.add_argument(
         "--stage_b_architectures",
