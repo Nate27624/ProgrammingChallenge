@@ -26,6 +26,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
+from sklearn.metrics import f1_score
 
 from dataloader import get_dataloaders, N_MELS, N_MFCC
 from baseline import BaselineLSTM
@@ -40,14 +41,16 @@ CONFIG = {
     "n_features": N_MFCC,
     "hidden_size":   128,
     "num_layers":    2,
-    "dropout":       0.2,
-    "mamba_d_model": 128,
+    "dropout":       0.35,
+    "mamba_d_model": 96,
     "mamba_d_state": 32,
     "mamba_d_conv": 4,
     "mamba_expand": 2,
-    "cnn_channels": 64,
+    "cnn_channels": 48,
     "batch_size":    64,
     "learning_rate": 3e-4,
+    "weight_decay":  1e-4,
+    "label_smoothing": 0.05,
     "num_epochs":    100,
     "patience":      10,      # early stopping patience (epochs)
     "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
@@ -94,6 +97,7 @@ def validate(model, loader, criterion, device):
     """Run one validation epoch."""
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
+    all_preds, all_labels = [], []
 
     pbar = tqdm(loader, desc="  Val  ", leave=False)
     with torch.no_grad():
@@ -103,12 +107,16 @@ def validate(model, loader, criterion, device):
             loss   = criterion(logits, labels)
 
             total_loss += loss.item() * specs.size(0)
-            correct    += (logits.argmax(dim=1) == labels).sum().item()
+            preds = logits.argmax(dim=1)
+            correct    += (preds == labels).sum().item()
             total      += specs.size(0)
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-    return total_loss / total, correct / total
+    weighted_f1 = f1_score(all_labels, all_preds, average="weighted")
+    return total_loss / total, correct / total, weighted_f1
 
 
 # ── Loss curve plotting ────────────────────────────────────────────────────────
@@ -174,6 +182,8 @@ def main(args):
     config["cnn_channels"] = args.cnn_channels
     config["batch_size"] = args.batch_size
     config["learning_rate"] = args.learning_rate
+    config["weight_decay"] = args.weight_decay
+    config["label_smoothing"] = args.label_smoothing
     config["num_epochs"] = args.num_epochs
     config["patience"] = args.patience
     config["patience_lr"] = args.patience_lr
@@ -221,6 +231,8 @@ def main(args):
                 "mamba_d_conv": config["mamba_d_conv"],
                 "mamba_expand": config["mamba_expand"],
                 "cnn_channels": config["cnn_channels"],
+                "weight_decay": config["weight_decay"],
+                "label_smoothing": config["label_smoothing"],
             },
         },
         norm_stats_path
@@ -254,8 +266,12 @@ def main(args):
     print(f"\nModel: {model.__class__.__name__}")
     print(f"Trainable parameters: {model.count_parameters():,}")
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
+    criterion = nn.CrossEntropyLoss(label_smoothing=config["label_smoothing"])
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config["learning_rate"],
+        weight_decay=config["weight_decay"],
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=config["patience_lr"]
     )
@@ -263,6 +279,7 @@ def main(args):
     # ── Resume logic ──────────────────────────────────────────────────────────
     start_epoch      = 0
     best_val_loss    = float("inf")
+    best_val_f1      = float("-inf")
     patience_counter = 0
     stopped_epoch    = None
     train_losses, val_losses = [], []
@@ -280,6 +297,7 @@ def main(args):
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch      = ckpt["epoch"] + 1
         best_val_loss    = ckpt["best_val_loss"]
+        best_val_f1      = ckpt.get("best_val_f1", float("-inf"))
         patience_counter = ckpt["patience_counter"]
         train_losses     = ckpt["train_losses"]
         val_losses       = ckpt["val_losses"]
@@ -316,7 +334,7 @@ def main(args):
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device
         )
-        val_loss, val_acc = validate(
+        val_loss, val_acc, val_f1 = validate(
             model, val_loader, criterion, device
         )
         scheduler.step(val_loss)
@@ -335,20 +353,28 @@ def main(args):
             "epoch/val_loss":    val_loss,
             "epoch/train_acc":   train_acc * 100,
             "epoch/val_acc":     val_acc   * 100,
+            "epoch/val_f1":      val_f1,
             "epoch/lr":          lr,
         })
 
         print(f"Epoch {epoch + 1:>3}/{config['num_epochs']}  "
               f"train_loss: {train_loss:.4f}  train_acc: {train_acc:.4f}  "
               f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}  "
+              f"val_f1: {val_f1:.4f}  "
               f"lr: {lr:.2e}")
 
-        # Save best model
-        if val_loss < best_val_loss:
+        # Save best model by weighted F1; use loss as tiebreaker
+        is_better_f1 = val_f1 > best_val_f1 + 1e-6
+        is_tie_better_loss = abs(val_f1 - best_val_f1) <= 1e-6 and val_loss < best_val_loss
+        if is_better_f1 or is_tie_better_loss:
+            best_val_f1      = val_f1
             best_val_loss    = val_loss
             patience_counter = 0
             torch.save(model.state_dict(), best_model_path)
-            print(f"  --> New best model saved (val_loss: {best_val_loss:.4f})")
+            print(
+                "  --> New best model saved "
+                f"(val_f1: {best_val_f1:.4f}, val_loss: {best_val_loss:.4f})"
+            )
         else:
             patience_counter += 1
             if patience_counter >= config["patience"]:
@@ -363,6 +389,7 @@ def main(args):
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "best_val_loss":        best_val_loss,
+            "best_val_f1":          best_val_f1,
             "patience_counter":     patience_counter,
             "train_losses":         train_losses,
             "val_losses":           val_losses,
@@ -477,14 +504,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dropout",
         type=float,
-        default=0.2,
-        help="Dropout probability (default: 0.2).",
+        default=0.35,
+        help="Dropout probability (default: 0.35).",
     )
     parser.add_argument(
         "--mamba_d_model",
         type=int,
-        default=128,
-        help="Mamba hidden model width (default: 128).",
+        default=96,
+        help="Mamba hidden model width (default: 96).",
     )
     parser.add_argument(
         "--mamba_d_state",
@@ -507,8 +534,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cnn_channels",
         type=int,
-        default=64,
-        help="CNN front-end output channels (default: 64).",
+        default=48,
+        help="CNN front-end output channels (default: 48).",
     )
     parser.add_argument(
         "--batch_size",
@@ -521,6 +548,18 @@ if __name__ == "__main__":
         type=float,
         default=3e-4,
         help="Learning rate (default: 3e-4).",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-4,
+        help="Adam weight decay (default: 1e-4).",
+    )
+    parser.add_argument(
+        "--label_smoothing",
+        type=float,
+        default=0.05,
+        help="Cross-entropy label smoothing (default: 0.05).",
     )
     parser.add_argument(
         "--num_epochs",

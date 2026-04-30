@@ -32,7 +32,8 @@ import torchaudio.functional as AF
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, random_split, Subset
+from torch.utils.data import Dataset, DataLoader, Subset
+from sklearn.model_selection import train_test_split
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -237,17 +238,21 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         apply_db = apply_db,
     )
 
-    # Train / validation split
+    # Stratified train / validation split for stable validation signal
     n_total = len(full_train_raw)
-    n_val   = int(n_total * val_split)
-    n_train = n_total - n_val
-
-    generator = torch.Generator().manual_seed(random_seed)
-    train_subset, val_subset = random_split(
-        full_train_raw, [n_train, n_val], generator=generator
+    all_indices = np.arange(n_total)
+    all_labels = np.array([label for _, label in full_train_raw.samples])
+    train_indices, val_indices = train_test_split(
+        all_indices,
+        test_size=val_split,
+        random_state=random_seed,
+        shuffle=True,
+        stratify=all_labels,
     )
-    train_indices = train_subset.indices
-    val_indices = val_subset.indices
+    train_indices = train_indices.tolist()
+    val_indices = val_indices.tolist()
+    n_train = len(train_indices)
+    n_val = len(val_indices)
 
     # Compute normalisation statistics on the training portion only
     train_stats_dataset = Subset(full_train_raw, train_indices)
