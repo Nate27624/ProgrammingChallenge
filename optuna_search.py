@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 from collections import defaultdict
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchaudio.transforms as T
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split
@@ -54,6 +56,42 @@ class DataBundle:
     val_indices: list[int]
     mean: torch.Tensor
     std: torch.Tensor
+
+
+class FocalLoss(nn.Module):
+    """Multiclass focal loss with optional class weighting and label smoothing."""
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        class_weights: torch.Tensor | None = None,
+        label_smoothing: float = 0.0,
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.class_weights = class_weights
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_probs = F.log_softmax(logits, dim=1)
+        probs = log_probs.exp()
+        nll = -log_probs.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+        pt = probs.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+
+        if self.label_smoothing > 0.0:
+            smooth_loss = -log_probs.mean(dim=1)
+            ce = (1.0 - self.label_smoothing) * nll + self.label_smoothing * smooth_loss
+        else:
+            ce = nll
+
+        if self.class_weights is not None:
+            alpha_t = self.class_weights.gather(dim=0, index=targets)
+        else:
+            alpha_t = torch.ones_like(ce)
+
+        focal_factor = (1.0 - pt).pow(self.gamma)
+        loss = alpha_t * focal_factor * ce
+        return loss.mean()
 
 
 def set_global_seed(seed: int) -> None:
@@ -198,6 +236,55 @@ def make_dataloaders_for_trial(
         pin_memory=pin_memory,
     )
     return train_loader, val_loader
+
+
+def build_class_weights_from_bundle(bundle: DataBundle, device: torch.device) -> torch.Tensor:
+    labels = []
+    raw = SpeechEmotionDataset(
+        audio_dir=bundle.train_dir / "audio",
+        labels_csv=bundle.train_dir / "train_labels.csv",
+        transform=bundle.feature_transform,
+        max_frames=bundle.max_frames,
+        include_deltas=True,
+        apply_db=bundle.apply_db,
+    )
+    for idx in bundle.train_indices:
+        labels.append(int(raw.samples[idx][1]))
+    label_tensor = torch.tensor(labels, dtype=torch.long)
+    num_classes = int(label_tensor.max().item()) + 1
+    counts = torch.bincount(label_tensor, minlength=num_classes).float().clamp_min(1.0)
+    weights = counts.sum() / (counts * num_classes)
+    return weights.to(device)
+
+
+def build_lr_lambda(
+    schedule_type: str,
+    max_epochs: int,
+    warmup_epochs: int,
+    min_lr_ratio: float,
+):
+    warmup_epochs = max(1, warmup_epochs)
+    if schedule_type == "warmup_invsqrt":
+        def lr_lambda(epoch: int) -> float:
+            step = epoch + 1
+            if step <= warmup_epochs:
+                return step / warmup_epochs
+            return (warmup_epochs ** 0.5) / (step ** 0.5)
+        return lr_lambda
+
+    if schedule_type == "warmup_cosine":
+        decay_epochs = max(1, max_epochs - warmup_epochs)
+
+        def lr_lambda(epoch: int) -> float:
+            step = epoch + 1
+            if step <= warmup_epochs:
+                return step / warmup_epochs
+            progress = min(1.0, (step - warmup_epochs) / decay_epochs)
+            cosine = 0.5 * (1.0 + math.cos(progress * math.pi))
+            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+        return lr_lambda
+
+    raise ValueError(f"Unsupported scheduler_type: {schedule_type}")
 
 
 def train_one_epoch(
@@ -398,6 +485,12 @@ def sample_stage_a_config(
     weight_decay = trial.suggest_categorical("weight_decay", [1e-4])
     label_smoothing = trial.suggest_categorical("label_smoothing", [0.05])
     learning_rate = trial.suggest_categorical("learning_rate", [3e-4])
+    loss_type = trial.suggest_categorical("loss_type", ["ce"])
+    focal_gamma = trial.suggest_categorical("focal_gamma", [2.0])
+    class_weighting = trial.suggest_categorical("class_weighting", [False])
+    scheduler_type = trial.suggest_categorical("scheduler_type", ["plateau"])
+    warmup_epochs = trial.suggest_categorical("warmup_epochs", [5])
+    min_lr_ratio = trial.suggest_categorical("min_lr_ratio", [0.1])
     batch_size = trial.suggest_categorical("batch_size", [args.stage_a_batch_size])
     num_time_masks = trial.suggest_categorical("num_time_masks", [2])
     time_mask_param = trial.suggest_categorical("time_mask_param", [24])
@@ -418,6 +511,12 @@ def sample_stage_a_config(
         "weight_decay": weight_decay,
         "label_smoothing": label_smoothing,
         "learning_rate": learning_rate,
+        "loss_type": loss_type,
+        "focal_gamma": focal_gamma,
+        "class_weighting": class_weighting,
+        "scheduler_type": scheduler_type,
+        "warmup_epochs": warmup_epochs,
+        "min_lr_ratio": min_lr_ratio,
         "batch_size": batch_size,
         "num_time_masks": num_time_masks,
         "time_mask_param": time_mask_param,
@@ -487,6 +586,17 @@ def sample_stage_b_config(
     dropout = trial.suggest_float("dropout", dropout_min, dropout_max)
     weight_decay = trial.suggest_float("weight_decay", wd_min, wd_max, log=True)
     label_smoothing = trial.suggest_float("label_smoothing", ls_min, ls_max)
+    loss_type = trial.suggest_categorical("loss_type", ["ce", "focal"])
+    if loss_type == "focal":
+        focal_gamma = trial.suggest_float("focal_gamma", 1.5, 3.0)
+    else:
+        focal_gamma = 2.0
+    class_weighting = trial.suggest_categorical("class_weighting", [False, True])
+    scheduler_type = trial.suggest_categorical(
+        "scheduler_type", ["plateau", "warmup_invsqrt", "warmup_cosine"]
+    )
+    warmup_epochs = trial.suggest_int("warmup_epochs", 2, 8)
+    min_lr_ratio = trial.suggest_float("min_lr_ratio", 0.05, 0.30)
 
     return {
         "mamba_d_model": d_model,
@@ -502,6 +612,12 @@ def sample_stage_b_config(
         "dropout": dropout,
         "weight_decay": weight_decay,
         "label_smoothing": label_smoothing,
+        "loss_type": loss_type,
+        "focal_gamma": focal_gamma,
+        "class_weighting": class_weighting,
+        "scheduler_type": scheduler_type,
+        "warmup_epochs": warmup_epochs,
+        "min_lr_ratio": min_lr_ratio,
         "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True),
         "batch_size": trial.suggest_categorical("batch_size", [32, 64]),
         "num_time_masks": trial.suggest_int("num_time_masks", tmask_min, tmask_max),
@@ -554,15 +670,43 @@ def build_objective(
             pooling_type=str(config["pooling_type"]),
         ).to(device)
 
-        criterion = nn.CrossEntropyLoss(label_smoothing=float(config["label_smoothing"]))
+        class_weights = None
+        if bool(config["class_weighting"]):
+            class_weights = build_class_weights_from_bundle(bundle, device)
+
+        if str(config["loss_type"]) == "ce":
+            criterion = nn.CrossEntropyLoss(
+                weight=class_weights,
+                label_smoothing=float(config["label_smoothing"]),
+            )
+        elif str(config["loss_type"]) == "focal":
+            criterion = FocalLoss(
+                gamma=float(config["focal_gamma"]),
+                class_weights=class_weights,
+                label_smoothing=float(config["label_smoothing"]),
+            )
+        else:
+            raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
+
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=float(config["learning_rate"]),
             weight_decay=float(config["weight_decay"]),
         )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=args.patience_lr
-        )
+        if str(config["scheduler_type"]) == "plateau":
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min", factor=0.5, patience=args.patience_lr
+            )
+        else:
+            lr_lambda = build_lr_lambda(
+                schedule_type=str(config["scheduler_type"]),
+                max_epochs=args.max_epochs,
+                warmup_epochs=int(config["warmup_epochs"]),
+                min_lr_ratio=float(config["min_lr_ratio"]),
+            )
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, lr_lambda=lr_lambda
+            )
         amp_enabled = bool(args.amp and device.type == "cuda")
         scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
@@ -578,7 +722,10 @@ def build_objective(
                 val_loss, val_acc, val_f1 = validate(
                     model, val_loader, criterion, device, amp_enabled
                 )
-                scheduler.step(val_loss)
+                if str(config["scheduler_type"]) == "plateau":
+                    scheduler.step(val_loss)
+                else:
+                    scheduler.step()
 
                 trial.report(val_f1, step=epoch)
                 if trial.should_prune():
@@ -812,7 +959,13 @@ def main():
         f"--dropout {study.best_trial.params['dropout']}",
         f"--learning_rate {study.best_trial.params['learning_rate']}",
         f"--weight_decay {study.best_trial.params['weight_decay']}",
+        f"--loss_type {study.best_trial.params['loss_type']}",
+        f"--focal_gamma {study.best_trial.params['focal_gamma']}",
+        "--class_weighting" if study.best_trial.params["class_weighting"] else "--no_class_weighting",
         f"--label_smoothing {study.best_trial.params['label_smoothing']}",
+        f"--scheduler_type {study.best_trial.params['scheduler_type']}",
+        f"--warmup_epochs {study.best_trial.params['warmup_epochs']}",
+        f"--min_lr_ratio {study.best_trial.params['min_lr_ratio']}",
         f"--batch_size {study.best_trial.params['batch_size']}",
         f"--num_time_masks {study.best_trial.params['num_time_masks']}",
         f"--time_mask_param {study.best_trial.params['time_mask_param']}",

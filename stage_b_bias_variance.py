@@ -24,6 +24,9 @@ from model import BidirectionalMambaSER
 from optuna_search import (
     N_MFCC,
     N_MELS,
+    FocalLoss,
+    build_class_weights_from_bundle,
+    build_lr_lambda,
     prepare_data_bundle,
     set_global_seed,
     make_dataloaders_for_trial,
@@ -70,6 +73,12 @@ def trial_to_config(params: Dict[str, Any]) -> Dict[str, Any]:
         "dropout": float(params["dropout"]),
         "weight_decay": float(params["weight_decay"]),
         "label_smoothing": float(params["label_smoothing"]),
+        "loss_type": str(params.get("loss_type", "ce")),
+        "focal_gamma": float(params.get("focal_gamma", 2.0)),
+        "class_weighting": bool(params.get("class_weighting", False)),
+        "scheduler_type": str(params.get("scheduler_type", "plateau")),
+        "warmup_epochs": int(params.get("warmup_epochs", 5)),
+        "min_lr_ratio": float(params.get("min_lr_ratio", 0.1)),
         "learning_rate": float(params["learning_rate"]),
         "batch_size": int(params["batch_size"]),
         "num_time_masks": int(params["num_time_masks"]),
@@ -114,15 +123,40 @@ def run_single_seed(
         pooling_type=str(config["pooling_type"]),
     ).to(device)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=float(config["label_smoothing"]))
+    class_weights = None
+    if bool(config["class_weighting"]):
+        class_weights = build_class_weights_from_bundle(bundle, device)
+
+    if str(config["loss_type"]) == "ce":
+        criterion = nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=float(config["label_smoothing"]),
+        )
+    elif str(config["loss_type"]) == "focal":
+        criterion = FocalLoss(
+            gamma=float(config["focal_gamma"]),
+            class_weights=class_weights,
+            label_smoothing=float(config["label_smoothing"]),
+        )
+    else:
+        raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(config["learning_rate"]),
         weight_decay=float(config["weight_decay"]),
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=args.patience_lr
-    )
+    if str(config["scheduler_type"]) == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=args.patience_lr
+        )
+    else:
+        lr_lambda = build_lr_lambda(
+            schedule_type=str(config["scheduler_type"]),
+            max_epochs=args.max_epochs,
+            warmup_epochs=int(config["warmup_epochs"]),
+            min_lr_ratio=float(config["min_lr_ratio"]),
+        )
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     amp_enabled = bool(args.amp and device.type == "cuda")
     scaler = torch.amp.GradScaler(enabled=amp_enabled)
@@ -142,7 +176,10 @@ def run_single_seed(
             _ = train_loss
             _ = train_acc
             _ = val_acc
-            scheduler.step(val_loss)
+            if str(config["scheduler_type"]) == "plateau":
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
 
             is_better_f1 = val_f1 > best_val_f1 + 1e-6
             is_tie_better_loss = abs(val_f1 - best_val_f1) <= 1e-6 and val_loss < best_val_loss
@@ -256,6 +293,12 @@ def main() -> None:
                     "dropout": cfg["dropout"],
                     "weight_decay": cfg["weight_decay"],
                     "label_smoothing": cfg["label_smoothing"],
+                    "loss_type": cfg["loss_type"],
+                    "focal_gamma": cfg["focal_gamma"],
+                    "class_weighting": cfg["class_weighting"],
+                    "scheduler_type": cfg["scheduler_type"],
+                    "warmup_epochs": cfg["warmup_epochs"],
+                    "min_lr_ratio": cfg["min_lr_ratio"],
                     "learning_rate": cfg["learning_rate"],
                     "batch_size": cfg["batch_size"],
                 }
@@ -292,6 +335,12 @@ def main() -> None:
                 "dropout": cfg["dropout"],
                 "weight_decay": cfg["weight_decay"],
                 "label_smoothing": cfg["label_smoothing"],
+                "loss_type": cfg["loss_type"],
+                "focal_gamma": cfg["focal_gamma"],
+                "class_weighting": cfg["class_weighting"],
+                "scheduler_type": cfg["scheduler_type"],
+                "warmup_epochs": cfg["warmup_epochs"],
+                "min_lr_ratio": cfg["min_lr_ratio"],
                 "learning_rate": cfg["learning_rate"],
                 "batch_size": cfg["batch_size"],
                 "num_time_masks": cfg["num_time_masks"],
@@ -359,7 +408,13 @@ def main() -> None:
             f"--dropout {best['dropout']}",
             f"--learning_rate {best['learning_rate']}",
             f"--weight_decay {best['weight_decay']}",
+            f"--loss_type {best['loss_type']}",
+            f"--focal_gamma {best['focal_gamma']}",
+            "--class_weighting" if best["class_weighting"] else "--no_class_weighting",
             f"--label_smoothing {best['label_smoothing']}",
+            f"--scheduler_type {best['scheduler_type']}",
+            f"--warmup_epochs {best['warmup_epochs']}",
+            f"--min_lr_ratio {best['min_lr_ratio']}",
             f"--batch_size {best['batch_size']}",
             f"--num_time_masks {best['num_time_masks']}",
             f"--time_mask_param {best['time_mask_param']}",

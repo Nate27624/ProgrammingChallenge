@@ -20,9 +20,11 @@ Outputs saved to <results_dir>/<team_name>/:
 """
 
 import argparse
+import math
 import uuid
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
@@ -53,7 +55,13 @@ CONFIG = {
     "batch_size":    64,
     "learning_rate": 3e-4,
     "weight_decay":  1e-4,
+    "loss_type": "ce",
+    "focal_gamma": 2.0,
+    "class_weighting": False,
     "label_smoothing": 0.05,
+    "scheduler_type": "plateau",
+    "warmup_epochs": 5,
+    "min_lr_ratio": 0.1,
     "num_epochs":    100,
     "patience":      10,      # early stopping patience (epochs)
     "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
@@ -65,6 +73,91 @@ CONFIG = {
     "num_freq_masks": 2,
     "freq_mask_param": 8,
 }
+
+
+class FocalLoss(nn.Module):
+    """Multiclass focal loss with optional class weighting and label smoothing."""
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        class_weights: torch.Tensor | None = None,
+        label_smoothing: float = 0.0,
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.class_weights = class_weights
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_probs = F.log_softmax(logits, dim=1)
+        probs = log_probs.exp()
+        nll = -log_probs.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+        pt = probs.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+
+        if self.label_smoothing > 0.0:
+            smooth_loss = -log_probs.mean(dim=1)
+            ce = (1.0 - self.label_smoothing) * nll + self.label_smoothing * smooth_loss
+        else:
+            ce = nll
+
+        if self.class_weights is not None:
+            alpha_t = self.class_weights.gather(dim=0, index=targets)
+        else:
+            alpha_t = torch.ones_like(ce)
+
+        focal_factor = (1.0 - pt).pow(self.gamma)
+        loss = alpha_t * focal_factor * ce
+        return loss.mean()
+
+
+def _extract_train_labels(loader) -> list[int]:
+    dataset = loader.dataset
+    if hasattr(dataset, "indices") and hasattr(dataset, "dataset"):
+        base = dataset.dataset
+        return [int(base.samples[idx][1]) for idx in dataset.indices]
+    if hasattr(dataset, "samples"):
+        return [int(label) for _, label in dataset.samples]
+    raise ValueError("Unable to extract labels from train loader dataset.")
+
+
+def build_class_weights(train_labels: list[int], device: torch.device) -> torch.Tensor:
+    labels = torch.tensor(train_labels, dtype=torch.long)
+    num_classes = int(labels.max().item()) + 1
+    counts = torch.bincount(labels, minlength=num_classes).float().clamp_min(1.0)
+    weights = counts.sum() / (counts * num_classes)
+    return weights.to(device)
+
+
+def build_lr_lambda(
+    schedule_type: str,
+    num_epochs: int,
+    warmup_epochs: int,
+    min_lr_ratio: float,
+):
+    warmup_epochs = max(1, warmup_epochs)
+
+    if schedule_type == "warmup_invsqrt":
+        def lr_lambda(epoch: int) -> float:
+            step = epoch + 1
+            if step <= warmup_epochs:
+                return step / warmup_epochs
+            return (warmup_epochs ** 0.5) / (step ** 0.5)
+        return lr_lambda
+
+    if schedule_type == "warmup_cosine":
+        decay_epochs = max(1, num_epochs - warmup_epochs)
+
+        def lr_lambda(epoch: int) -> float:
+            step = epoch + 1
+            if step <= warmup_epochs:
+                return step / warmup_epochs
+            progress = min(1.0, (step - warmup_epochs) / decay_epochs)
+            cosine = 0.5 * (1.0 + math.cos(progress * math.pi))
+            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+        return lr_lambda
+
+    raise ValueError(f"Unsupported scheduler_type: {schedule_type}")
 
 
 # ── One training epoch ─────────────────────────────────────────────────────────
@@ -189,7 +282,13 @@ def main(args):
     config["batch_size"] = args.batch_size
     config["learning_rate"] = args.learning_rate
     config["weight_decay"] = args.weight_decay
+    config["loss_type"] = args.loss_type
+    config["focal_gamma"] = args.focal_gamma
+    config["class_weighting"] = args.class_weighting
     config["label_smoothing"] = args.label_smoothing
+    config["scheduler_type"] = args.scheduler_type
+    config["warmup_epochs"] = args.warmup_epochs
+    config["min_lr_ratio"] = args.min_lr_ratio
     config["num_epochs"] = args.num_epochs
     config["patience"] = args.patience
     config["patience_lr"] = args.patience_lr
@@ -242,6 +341,12 @@ def main(args):
                 "pooling_type": config["pooling_type"],
                 "weight_decay": config["weight_decay"],
                 "label_smoothing": config["label_smoothing"],
+                "loss_type": config["loss_type"],
+                "focal_gamma": config["focal_gamma"],
+                "class_weighting": config["class_weighting"],
+                "scheduler_type": config["scheduler_type"],
+                "warmup_epochs": config["warmup_epochs"],
+                "min_lr_ratio": config["min_lr_ratio"],
             },
         },
         norm_stats_path
@@ -278,15 +383,43 @@ def main(args):
     print(f"\nModel: {model.__class__.__name__}")
     print(f"Trainable parameters: {model.count_parameters():,}")
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=config["label_smoothing"])
+    class_weights = None
+    if config["class_weighting"]:
+        train_labels = _extract_train_labels(train_loader)
+        class_weights = build_class_weights(train_labels, device)
+        print(f"Using class-weighted loss with weights: {class_weights.tolist()}")
+
+    if config["loss_type"] == "ce":
+        criterion = nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=config["label_smoothing"],
+        )
+    elif config["loss_type"] == "focal":
+        criterion = FocalLoss(
+            gamma=config["focal_gamma"],
+            class_weights=class_weights,
+            label_smoothing=config["label_smoothing"],
+        )
+    else:
+        raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
+
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config["learning_rate"],
         weight_decay=config["weight_decay"],
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=config["patience_lr"]
-    )
+    if config["scheduler_type"] == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=config["patience_lr"]
+        )
+    else:
+        lr_lambda = build_lr_lambda(
+            schedule_type=config["scheduler_type"],
+            num_epochs=config["num_epochs"],
+            warmup_epochs=config["warmup_epochs"],
+            min_lr_ratio=config["min_lr_ratio"],
+        )
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     # ── Resume logic ──────────────────────────────────────────────────────────
     start_epoch      = 0
@@ -306,7 +439,10 @@ def main(args):
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        try:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        except Exception as exc:
+            print(f"Warning: could not restore scheduler state ({exc}). Continuing with fresh scheduler.")
         start_epoch      = ckpt["epoch"] + 1
         best_val_loss    = ckpt["best_val_loss"]
         best_val_f1      = ckpt.get("best_val_f1", float("-inf"))
@@ -349,7 +485,10 @@ def main(args):
         val_loss, val_acc, val_f1 = validate(
             model, val_loader, criterion, device
         )
-        scheduler.step(val_loss)
+        if config["scheduler_type"] == "plateau":
+            scheduler.step(val_loss)
+        else:
+            scheduler.step()
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -589,10 +728,54 @@ if __name__ == "__main__":
         help="Adam weight decay (default: 1e-4).",
     )
     parser.add_argument(
+        "--loss_type",
+        type=str,
+        choices=["ce", "focal"],
+        default="ce",
+        help="Classification loss type (default: ce).",
+    )
+    parser.add_argument(
+        "--focal_gamma",
+        type=float,
+        default=2.0,
+        help="Focal loss gamma when --loss_type focal (default: 2.0).",
+    )
+    parser.add_argument(
+        "--class_weighting",
+        action="store_true",
+        default=False,
+        help="Enable inverse-frequency class weighting in CE/Focal.",
+    )
+    parser.add_argument(
+        "--no_class_weighting",
+        action="store_false",
+        dest="class_weighting",
+        help="Disable class weighting (default).",
+    )
+    parser.add_argument(
         "--label_smoothing",
         type=float,
         default=0.05,
         help="Cross-entropy label smoothing (default: 0.05).",
+    )
+    parser.add_argument(
+        "--scheduler_type",
+        type=str,
+        choices=["plateau", "warmup_invsqrt", "warmup_cosine"],
+        default="plateau",
+        help="LR scheduler (default: plateau).",
+    )
+    parser.add_argument(
+        "--warmup_epochs",
+        type=int,
+        default=5,
+        help="Warmup epochs for warmup schedulers (default: 5).",
+    )
+    parser.add_argument(
+        "--min_lr_ratio",
+        type=float,
+        default=0.1,
+        help="Min LR / base LR ratio at end of warmup_cosine (default: 0.1).",
     )
     parser.add_argument(
         "--num_epochs",
