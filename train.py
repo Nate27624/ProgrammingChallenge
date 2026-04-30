@@ -19,32 +19,41 @@ Outputs saved to <results_dir>/<team_name>/:
     loss_curve.png    <- training and validation loss/accuracy curves
 """
 
-import os
 import argparse
-import wandb
+import uuid
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 
-from dataloader import get_dataloaders, N_MELS
+from dataloader import get_dataloaders, N_MELS, N_MFCC
 from baseline import BaselineLSTM
+from model import BidirectionalMambaSER
+from wandb_compat import wandb
 
 
 # ── Default hyperparameters ────────────────────────────────────────────────────
 CONFIG = {
+    "model_name": "mamba",
+    "feature_type": "mfcc",
+    "n_features": N_MFCC,
     "hidden_size":   128,
     "num_layers":    2,
-    "dropout":       0.0,
+    "dropout":       0.2,
+    "mamba_d_model": 128,
+    "mamba_d_state": 32,
+    "mamba_d_conv": 4,
+    "mamba_expand": 2,
+    "cnn_channels": 64,
     "batch_size":    64,
-    "learning_rate": 1e-2,
+    "learning_rate": 3e-4,
     "num_epochs":    100,
     "patience":      10,      # early stopping patience (epochs)
     "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
     "val_split":     0.15,
-    "include_deltas": False,
-    "specaugment": False,
+    "include_deltas": True,
+    "specaugment": True,
     "num_time_masks": 2,
     "time_mask_param": 24,
     "num_freq_masks": 2,
@@ -143,12 +152,32 @@ def plot_curves(train_losses, val_losses, train_accs, val_accs,
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main(args):
     config = CONFIG.copy()
+    config["model_name"] = args.model_name
+    config["feature_type"] = args.feature_type
+    if args.n_features is None:
+        config["n_features"] = N_MFCC if args.feature_type == "mfcc" else N_MELS
+    else:
+        config["n_features"] = args.n_features
     config["include_deltas"] = args.include_deltas
     config["specaugment"] = args.specaugment
     config["num_time_masks"] = args.num_time_masks
     config["time_mask_param"] = args.time_mask_param
     config["num_freq_masks"] = args.num_freq_masks
     config["freq_mask_param"] = args.freq_mask_param
+    config["hidden_size"] = args.hidden_size
+    config["num_layers"] = args.num_layers
+    config["dropout"] = args.dropout
+    config["mamba_d_model"] = args.mamba_d_model
+    config["mamba_d_state"] = args.mamba_d_state
+    config["mamba_d_conv"] = args.mamba_d_conv
+    config["mamba_expand"] = args.mamba_expand
+    config["cnn_channels"] = args.cnn_channels
+    config["batch_size"] = args.batch_size
+    config["learning_rate"] = args.learning_rate
+    config["num_epochs"] = args.num_epochs
+    config["patience"] = args.patience
+    config["patience_lr"] = args.patience_lr
+    config["val_split"] = args.val_split
 
     output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -172,27 +201,63 @@ def main(args):
         time_mask_param = config["time_mask_param"],
         num_freq_masks = config["num_freq_masks"],
         freq_mask_param = config["freq_mask_param"],
+        feature_type = config["feature_type"],
+        n_features = config["n_features"],
     )
     torch.save(
-        {"mean": mean, "std": std, "include_deltas": config["include_deltas"]},
+        {
+            "mean": mean,
+            "std": std,
+            "include_deltas": config["include_deltas"],
+            "feature_type": config["feature_type"],
+            "n_features": config["n_features"],
+            "model_name": config["model_name"],
+            "model_config": {
+                "hidden_size": config["hidden_size"],
+                "num_layers": config["num_layers"],
+                "dropout": config["dropout"],
+                "mamba_d_model": config["mamba_d_model"],
+                "mamba_d_state": config["mamba_d_state"],
+                "mamba_d_conv": config["mamba_d_conv"],
+                "mamba_expand": config["mamba_expand"],
+                "cnn_channels": config["cnn_channels"],
+            },
+        },
         norm_stats_path
     )
 
     # ── Model, optimiser, scheduler ───────────────────────────────────────────
-    input_size = N_MELS * (3 if config["include_deltas"] else 1)
-    model = BaselineLSTM(
-        input_size = input_size,
-        hidden_size = CONFIG["hidden_size"],
-        num_layers  = CONFIG["num_layers"],
-        dropout     = CONFIG["dropout"],
-    ).to(device)
+    in_channels = 3 if config["include_deltas"] else 1
+    if config["model_name"] == "mamba":
+        model = BidirectionalMambaSER(
+            in_channels=in_channels,
+            n_features=config["n_features"],
+            cnn_channels=config["cnn_channels"],
+            d_model=config["mamba_d_model"],
+            d_state=config["mamba_d_state"],
+            d_conv=config["mamba_d_conv"],
+            expand=config["mamba_expand"],
+            num_layers=config["num_layers"],
+            dropout=config["dropout"],
+        ).to(device)
+    elif config["model_name"] == "baseline":
+        input_size = config["n_features"] * in_channels
+        model = BaselineLSTM(
+            input_size=input_size,
+            hidden_size=config["hidden_size"],
+            num_layers=config["num_layers"],
+            dropout=config["dropout"],
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported model_name: {config['model_name']}")
+
     print(f"\nModel: {model.__class__.__name__}")
     print(f"Trainable parameters: {model.count_parameters():,}")
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["learning_rate"])
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=CONFIG["patience_lr"]
+        optimizer, mode="min", factor=0.5, patience=config["patience_lr"]
     )
 
     # ── Resume logic ──────────────────────────────────────────────────────────
@@ -202,7 +267,10 @@ def main(args):
     stopped_epoch    = None
     train_losses, val_losses = [], []
     train_accs,   val_accs   = [], []
-    wandb_id = wandb.util.generate_id()   # new ID by default
+    if hasattr(wandb, "util") and hasattr(wandb.util, "generate_id"):
+        wandb_id = wandb.util.generate_id()
+    else:
+        wandb_id = uuid.uuid4().hex[:8]
 
     if checkpoint_path.exists():
         print(f"\nFound checkpoint at {checkpoint_path}. Resuming training...")
@@ -226,7 +294,7 @@ def main(args):
     # ── Wandb initialisation ──────────────────────────────────────────────────
     # resume="allow" appends to the existing run when wandb_id matches
     run_name = args.run_name or (
-        f"baseline-lr{CONFIG['learning_rate']}-h{CONFIG['hidden_size']}"
+        f"{config['model_name']}-{config['feature_type']}-lr{config['learning_rate']}"
     )
     wandb.init(
         project = "CSE 5526 - Programming Challenge",
@@ -240,10 +308,10 @@ def main(args):
     wandb.define_metric("epoch/*", step_metric="epoch")
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    print(f"\nTraining for up to {CONFIG['num_epochs']} epochs "
-          f"(early stopping patience = {CONFIG['patience']})...\n")
+    print(f"\nTraining for up to {config['num_epochs']} epochs "
+          f"(early stopping patience = {config['patience']})...\n")
 
-    for epoch in range(start_epoch, CONFIG["num_epochs"]):
+    for epoch in range(start_epoch, config["num_epochs"]):
 
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device
@@ -270,7 +338,7 @@ def main(args):
             "epoch/lr":          lr,
         })
 
-        print(f"Epoch {epoch + 1:>3}/{CONFIG['num_epochs']}  "
+        print(f"Epoch {epoch + 1:>3}/{config['num_epochs']}  "
               f"train_loss: {train_loss:.4f}  train_acc: {train_acc:.4f}  "
               f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}  "
               f"lr: {lr:.2e}")
@@ -283,7 +351,7 @@ def main(args):
             print(f"  --> New best model saved (val_loss: {best_val_loss:.4f})")
         else:
             patience_counter += 1
-            if patience_counter >= CONFIG["patience"]:
+            if patience_counter >= config["patience"]:
                 stopped_epoch = epoch + 1
                 print(f"\nEarly stopping triggered at epoch {stopped_epoch}.")
                 break
@@ -351,14 +419,132 @@ if __name__ == "__main__":
         help="Optional wandb run name (default: auto-generated from config)",
     )
     parser.add_argument(
+        "--model_name",
+        type=str,
+        choices=["baseline", "mamba"],
+        default="mamba",
+        help="Model type to train (default: mamba).",
+    )
+    parser.add_argument(
+        "--feature_type",
+        type=str,
+        choices=["mel", "mfcc"],
+        default="mfcc",
+        help="Input feature type (default: mfcc).",
+    )
+    parser.add_argument(
+        "--n_features",
+        type=int,
+        default=None,
+        help="Number of feature bins (e.g., MFCC coeffs or mel bins).",
+    )
+    parser.add_argument(
         "--include_deltas",
         action="store_true",
-        help="Use delta + delta-delta channels (3x64 features per frame).",
+        default=True,
+        help="Use delta + delta-delta channels (default: enabled).",
+    )
+    parser.add_argument(
+        "--no_include_deltas",
+        action="store_false",
+        dest="include_deltas",
+        help="Disable delta + delta-delta channels.",
     )
     parser.add_argument(
         "--specaugment",
         action="store_true",
-        help="Apply SpecAugment to train split only.",
+        default=True,
+        help="Apply SpecAugment to train split only (default: enabled).",
+    )
+    parser.add_argument(
+        "--no_specaugment",
+        action="store_false",
+        dest="specaugment",
+        help="Disable SpecAugment.",
+    )
+    parser.add_argument(
+        "--hidden_size",
+        type=int,
+        default=128,
+        help="Baseline LSTM hidden size (used when --model_name baseline).",
+    )
+    parser.add_argument(
+        "--num_layers",
+        type=int,
+        default=2,
+        help="Number of recurrent/SSM layers (default: 2).",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.2,
+        help="Dropout probability (default: 0.2).",
+    )
+    parser.add_argument(
+        "--mamba_d_model",
+        type=int,
+        default=128,
+        help="Mamba hidden model width (default: 128).",
+    )
+    parser.add_argument(
+        "--mamba_d_state",
+        type=int,
+        default=32,
+        help="Mamba state dimension N (default: 32).",
+    )
+    parser.add_argument(
+        "--mamba_d_conv",
+        type=int,
+        default=4,
+        help="Mamba local convolution width (default: 4).",
+    )
+    parser.add_argument(
+        "--mamba_expand",
+        type=int,
+        default=2,
+        help="Mamba expansion factor E (default: 2).",
+    )
+    parser.add_argument(
+        "--cnn_channels",
+        type=int,
+        default=64,
+        help="CNN front-end output channels (default: 64).",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Mini-batch size (default: 64).",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=3e-4,
+        help="Learning rate (default: 3e-4).",
+    )
+    parser.add_argument(
+        "--num_epochs",
+        type=int,
+        default=100,
+        help="Maximum training epochs (default: 100).",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=10,
+        help="Early stopping patience (default: 10).",
+    )
+    parser.add_argument(
+        "--patience_lr",
+        type=int,
+        default=5,
+        help="ReduceLROnPlateau patience (default: 5).",
+    )
+    parser.add_argument(
+        "--val_split",
+        type=float,
+        default=0.15,
+        help="Validation split fraction (default: 0.15).",
     )
     parser.add_argument(
         "--num_time_masks",

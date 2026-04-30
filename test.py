@@ -29,7 +29,6 @@ Output:
 
 import argparse
 import csv
-import wandb
 import torch
 import torchaudio.transforms as T
 from pathlib import Path
@@ -37,8 +36,10 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 
 from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
-                        SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, MAX_FRAMES)
+                        SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
 from baseline import BaselineLSTM
+from model import BidirectionalMambaSER
+from wandb_compat import wandb
 
 
 # ── Inference ──────────────────────────────────────────────────────────────────
@@ -147,6 +148,10 @@ def main(args):
     stats     = torch.load(stats_path, map_location="cpu")
     mean, std = stats["mean"], stats["std"]
     include_deltas = bool(stats.get("include_deltas", False))
+    feature_type = stats.get("feature_type", "mel")
+    n_features = int(stats.get("n_features", N_MFCC if feature_type == "mfcc" else N_MELS))
+    model_name = stats.get("model_name", "baseline")
+    model_config = stats.get("model_config", {})
 
     # Locate labels CSV inside the test directory
     test_dir  = Path(args.test_dir)
@@ -158,20 +163,35 @@ def main(args):
     print(f"Labels file    : {labels_csv.name}")
 
     # Build test DataLoader
-    mel_transform = T.MelSpectrogram(
-        sample_rate = SAMPLE_RATE,
-        n_fft       = WIN_SIZE,
-        hop_length  = HOP_SIZE,
-        n_mels      = N_MELS,
-    )
+    if feature_type == "mfcc":
+        feature_transform = T.MFCC(
+            sample_rate=SAMPLE_RATE,
+            n_mfcc=n_features,
+            melkwargs={
+                "n_fft": WIN_SIZE,
+                "hop_length": HOP_SIZE,
+                "n_mels": N_MELS,
+            },
+        )
+        apply_db = False
+    else:
+        feature_transform = T.MelSpectrogram(
+            sample_rate=SAMPLE_RATE,
+            n_fft=WIN_SIZE,
+            hop_length=HOP_SIZE,
+            n_mels=n_features,
+        )
+        apply_db = True
+
     test_dataset = SpeechEmotionDataset(
         audio_dir  = test_dir / "audio",
         labels_csv = labels_csv,
-        transform  = mel_transform,
+        transform  = feature_transform,
         max_frames = MAX_FRAMES,
         mean       = mean,
         std        = std,
         include_deltas = include_deltas,
+        apply_db = apply_db,
     )
     test_loader = DataLoader(
         test_dataset, batch_size=64, shuffle=False, num_workers=0
@@ -179,8 +199,27 @@ def main(args):
     print(f"Test clips     : {len(test_dataset)}")
 
     # Load model
-    input_size = N_MELS * (3 if include_deltas else 1)
-    model = BaselineLSTM(input_size=input_size).to(device)
+    in_channels = 3 if include_deltas else 1
+    if model_name == "mamba":
+        model = BidirectionalMambaSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            cnn_channels=int(model_config.get("cnn_channels", 64)),
+            d_model=int(model_config.get("mamba_d_model", 128)),
+            d_state=int(model_config.get("mamba_d_state", 32)),
+            d_conv=int(model_config.get("mamba_d_conv", 4)),
+            expand=int(model_config.get("mamba_expand", 2)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.2)),
+        ).to(device)
+    else:
+        input_size = n_features * in_channels
+        model = BaselineLSTM(
+            input_size=input_size,
+            hidden_size=int(model_config.get("hidden_size", 128)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.0)),
+        ).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     print(f"Model loaded from : {model_path}")
 

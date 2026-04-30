@@ -6,13 +6,14 @@ for training, validation, and testing.
 
 Each audio clip is:
   1. Loaded as a waveform and resampled to 16 kHz
-  2. Converted to a 64-bin Mel-spectrogram
-  3. Padded or truncated to a fixed number of time frames
-  4. Normalised (mean 0, std 1) using training set statistics
+  2. Converted to either MFCC or Mel features
+  3. Optionally expanded with delta and delta-delta channels
+  4. Padded or truncated to a fixed number of time frames
+  5. Normalised (mean 0, std 1) using training set statistics
 
 The DataLoader returns:
-  - spectrogram : (batch, 1, n_mels, max_frames)  float32
-  - label       : (batch,)                         int64
+  - features : (batch, channels, n_features, max_frames)  float32
+  - label    : (batch,)                                   int64
 
 Usage:
     from dataloader import get_dataloaders
@@ -37,6 +38,7 @@ from torch.utils.data import Dataset, DataLoader, random_split, Subset
 # ── Constants ──────────────────────────────────────────────────────────────────
 SAMPLE_RATE   = 16000    # Hz — all clips resampled to this
 N_MELS        = 64       # number of Mel filterbanks
+N_MFCC        = 40       # number of MFCC coefficients
 WIN_SIZE_MS   = 25       # STFT window size in milliseconds
 HOP_SIZE_MS   = 10       # STFT hop size in milliseconds
 MAX_DURATION  = 3.0      # seconds — clips padded/truncated to this length
@@ -64,7 +66,7 @@ class SpeechEmotionDataset(Dataset):
     Args:
         audio_dir  : path to folder containing .wav files
         labels_csv : path to CSV with columns [clip_id, emotion]
-        transform  : torchaudio MelSpectrogram transform
+        transform  : torchaudio feature transform
         max_frames : fixed spectrogram length along the time axis
         mean       : (channels, n_mels, 1) tensor for normalisation
         std        : (channels, n_mels, 1) tensor for normalisation
@@ -74,7 +76,8 @@ class SpeechEmotionDataset(Dataset):
                  max_frames=MAX_FRAMES, mean=None, std=None,
                  include_deltas=False, apply_specaugment=False,
                  num_time_masks=2, time_mask_param=24,
-                 num_freq_masks=2, freq_mask_param=8):
+                 num_freq_masks=2, freq_mask_param=8,
+                 apply_db=False):
         self.audio_dir  = Path(audio_dir)
         self.transform  = transform
         self.max_frames = max_frames
@@ -84,6 +87,7 @@ class SpeechEmotionDataset(Dataset):
         self.apply_specaugment = apply_specaugment
         self.num_time_masks = num_time_masks
         self.num_freq_masks = num_freq_masks
+        self.apply_db = apply_db
         self.to_db = T.AmplitudeToDB()
         self.time_mask = T.TimeMasking(time_mask_param=time_mask_param)
         self.freq_mask = T.FrequencyMasking(freq_mask_param=freq_mask_param)
@@ -105,13 +109,16 @@ class SpeechEmotionDataset(Dataset):
         clip_id, label = self.samples[idx]
         wav_path = self.audio_dir / f"{clip_id}.wav"
 
-        import soundfile as sf
-        import numpy as np
-        waveform_np, sr = sf.read(str(wav_path), dtype='float32')
-        if waveform_np.ndim == 1:
-            waveform_np = np.expand_dims(waveform_np, axis=1) # (frames, 1)
-        waveform_np = waveform_np.transpose() # (channels, frames)
-        waveform = torch.from_numpy(waveform_np)
+        try:
+            import soundfile as sf
+
+            waveform_np, sr = sf.read(str(wav_path), dtype="float32")
+            if waveform_np.ndim == 1:
+                waveform = torch.from_numpy(waveform_np).unsqueeze(0)
+            else:
+                waveform = torch.from_numpy(waveform_np.T)
+        except Exception:
+            waveform, sr = torchaudio.load(wav_path)
 
         # Resample if needed
         if sr != SAMPLE_RATE:
@@ -121,11 +128,12 @@ class SpeechEmotionDataset(Dataset):
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
-        # Mel-spectrogram: (1, n_mels, time_frames)
+        # Features: (1, n_features, time_frames)
         spec = self.transform(waveform)
 
-        # Log compression
-        spec = self.to_db(spec)
+        # Log compression for magnitude features (e.g., Mel-spectrogram)
+        if self.apply_db:
+            spec = self.to_db(spec)
 
         # Pad or truncate to max_frames
         n_frames = spec.shape[-1]
@@ -163,7 +171,7 @@ def compute_mean_std(dataset):
     stacked   = torch.stack(all_specs, dim=0)          # (N, C, n_mels, T)
     mean      = stacked.mean(dim=(0, 3), keepdim=True).squeeze(0)   # (C, n_mels, 1)
     std       = stacked.std(dim=(0, 3),  keepdim=True).squeeze(0)   # (C, n_mels, 1)
-    print(f"  Done. Mean range: [{mean.min():.2f}, {mean.max():.2f}]")
+    print(f"  Done. Mean range: [{mean.min().item():.2f}, {mean.max().item():.2f}]")
     return mean, std
 
 
@@ -172,7 +180,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
                     num_workers=0, max_frames=MAX_FRAMES, random_seed=42,
                     include_deltas=False, apply_specaugment=False,
                     num_time_masks=2, time_mask_param=24,
-                    num_freq_masks=2, freq_mask_param=8):
+                    num_freq_masks=2, freq_mask_param=8,
+                    feature_type="mel", n_features=None):
     """Build DataLoaders for train, validation, and test splits.
 
     The training set is split into train and validation subsets using
@@ -193,20 +202,39 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     train_dir = data_dir / "train"
     test_dir  = data_dir / "test"
 
-    mel_transform = T.MelSpectrogram(
-        sample_rate = SAMPLE_RATE,
-        n_fft       = WIN_SIZE,
-        hop_length  = HOP_SIZE,
-        n_mels      = N_MELS,
-    )
+    if n_features is None:
+        n_features = N_MFCC if feature_type == "mfcc" else N_MELS
+
+    if feature_type == "mfcc":
+        feature_transform = T.MFCC(
+            sample_rate=SAMPLE_RATE,
+            n_mfcc=n_features,
+            melkwargs={
+                "n_fft": WIN_SIZE,
+                "hop_length": HOP_SIZE,
+                "n_mels": N_MELS,
+            },
+        )
+        apply_db = False
+    elif feature_type == "mel":
+        feature_transform = T.MelSpectrogram(
+            sample_rate=SAMPLE_RATE,
+            n_fft=WIN_SIZE,
+            hop_length=HOP_SIZE,
+            n_mels=n_features,
+        )
+        apply_db = True
+    else:
+        raise ValueError(f"Unsupported feature_type: {feature_type}")
 
     # Build full training dataset (no normalisation yet) to compute stats
     full_train_raw = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
         labels_csv = train_dir / "train_labels.csv",
-        transform  = mel_transform,
+        transform  = feature_transform,
         max_frames = max_frames,
         include_deltas = include_deltas,
+        apply_db = apply_db,
     )
 
     # Train / validation split
@@ -230,7 +258,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     train_dataset = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
         labels_csv = train_dir / "train_labels.csv",
-        transform  = mel_transform,
+        transform  = feature_transform,
         max_frames = max_frames,
         mean       = mean,
         std        = std,
@@ -240,15 +268,17 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         time_mask_param = time_mask_param,
         num_freq_masks = num_freq_masks,
         freq_mask_param = freq_mask_param,
+        apply_db = apply_db,
     )
     val_dataset = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
         labels_csv = train_dir / "train_labels.csv",
-        transform  = mel_transform,
+        transform  = feature_transform,
         max_frames = max_frames,
         mean       = mean,
         std        = std,
         include_deltas = include_deltas,
+        apply_db = apply_db,
     )
     train_final = Subset(train_dataset, train_indices)
     val_final = Subset(val_dataset, val_indices)
@@ -256,11 +286,12 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     test_dataset = SpeechEmotionDataset(
         audio_dir  = test_dir / "audio",
         labels_csv = test_dir / "test_labels.csv",
-        transform  = mel_transform,
+        transform  = feature_transform,
         max_frames = max_frames,
         mean       = mean,
         std        = std,
         include_deltas = include_deltas,
+        apply_db = apply_db,
     )
 
     train_loader = DataLoader(
@@ -281,7 +312,10 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     print(f"  Validation: {n_val:>5} clips  ({val_split*100:.0f}% of train)")
     print(f"  Test:       {len(test_dataset):>5} clips")
     n_channels = 3 if include_deltas else 1
-    print(f"\nSpectrogram shape: ({n_channels}, {N_MELS}, {max_frames})")
+    print(
+        f"\nFeature shape: ({n_channels}, {n_features}, {max_frames}) | "
+        f"type={feature_type}"
+    )
     if apply_specaugment:
         print(
             "SpecAugment (train only): "
