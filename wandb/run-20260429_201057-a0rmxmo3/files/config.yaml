@@ -1,0 +1,102 @@
+_wandb:
+    value:
+        cli_version: 0.26.1
+        e:
+            bzk88pu6rgha6ds8fvnt6dwetrd4t8ip:
+                args:
+                    - --test_dir
+                    - dataset/test
+                    - --results_dir
+                    - results
+                    - --team_name
+                    - phase1
+                    - --run_name
+                    - phase1_test
+                codePath: test.py
+                codePathLocal: test.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                cudaVersion: "12.9"
+                disk:
+                    /:
+                        total: "786430947328"
+                        used: "729557602304"
+                email: arens.32@buckeyemail.osu.edu
+                executable: C:\Users\diggy\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe
+                git:
+                    commit: c0e169aed6c59a4c2cefda60aadccaced828f81e
+                    remote: https://github.com/Nate27624/ProgrammingChallenge.git
+                gpu: NVIDIA GeForce RTX 5080
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 10752
+                      memoryTotal: "17094934528"
+                      name: NVIDIA GeForce RTX 5080
+                      uuid: GPU-f490488f-f247-20fe-f285-974762ee8431
+                host: NATES-SERVERMACHINE
+                memory:
+                    total: "33513934848"
+                os: Windows-11-10.0.26200-SP0
+                program: D:\School\CSE 5526\ProgrammingChallenge\TestSetup\ProgrammingChallenge\test.py
+                python: CPython 3.13.13
+                root: D:\School\CSE 5526\ProgrammingChallenge\TestSetup\ProgrammingChallenge
+                startedAt: "2026-04-30T00:10:57.135182Z"
+                writerId: bzk88pu6rgha6ds8fvnt6dwetrd4t8ip
+        m: []
+        python_version: 3.13.13
+        t:
+            "1":
+                - 1
+                - 5
+                - 53
+            "2":
+                - 1
+                - 5
+                - 53
+            "3":
+                - 2
+                - 13
+                - 16
+                - 62
+            "4": 3.13.13
+            "5": 0.26.1
+            "8":
+                - 3
+            "12": 0.26.1
+            "13": windows-amd64
+        visualize:
+            test/confusion_matrix:
+                panel_config:
+                    fieldSettings:
+                        Actual: Actual
+                        Predicted: Predicted
+                        nPredictions: nPredictions
+                    panelDefId: wandb/confusion_matrix/v1
+                    stringSettings:
+                        title: Confusion Matrix Curve
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: test/confusion_matrix_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+results_dir:
+    value: results\phase1
+test_dir:
+    value: dataset\test
