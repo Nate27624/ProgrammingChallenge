@@ -100,6 +100,57 @@ class ConvFrontEnd(nn.Module):
         return self.net(x)
 
 
+class ResidualConvFrontEnd(nn.Module):
+    """Residual 2D CNN front-end with the same downsample factor as ConvFrontEnd."""
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        mid_channels = max(out_channels // 2, 16)
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.SiLU(),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+        )
+        self.stem_skip = nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False)
+        self.stem_act = nn.SiLU()
+
+        self.block1 = nn.Sequential(
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=(1, 2), dilation=(1, 2), bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.SiLU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+        )
+        self.block1_skip = nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=False)
+        self.block1_act = nn.SiLU()
+        self.pool1 = nn.MaxPool2d(kernel_size=(2, 2))
+
+        self.block2 = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=(1, 4), dilation=(1, 4), bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.SiLU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+        )
+        self.block2_act = nn.SiLU()
+        self.pool2 = nn.MaxPool2d(kernel_size=(2, 2))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x) + self.stem_skip(x)
+        x = self.stem_act(x)
+
+        x = self.block1(x) + self.block1_skip(x)
+        x = self.block1_act(x)
+        x = self.pool1(x)
+
+        x = self.block2(x) + x
+        x = self.block2_act(x)
+        x = self.pool2(x)
+        return x
+
+
 class BidirectionalMambaSER(nn.Module):
     """CNN + bidirectional Mamba encoder for 6-class emotion classification."""
 
@@ -115,11 +166,23 @@ class BidirectionalMambaSER(nn.Module):
         expand: int = 2,
         num_layers: int = 2,
         dropout: float = 0.2,
+        frontend_type: str = "basic_cnn",
+        fusion_type: str = "concat",
+        pooling_type: str = "meanmax",
     ):
         super().__init__()
         mamba_factory = _resolve_mamba_block_factory()
+        self.frontend_type = frontend_type
+        self.fusion_type = fusion_type
+        self.pooling_type = pooling_type
 
-        self.frontend = ConvFrontEnd(in_channels=in_channels, out_channels=cnn_channels)
+        if frontend_type == "basic_cnn":
+            self.frontend = ConvFrontEnd(in_channels=in_channels, out_channels=cnn_channels)
+        elif frontend_type == "residual_cnn":
+            self.frontend = ResidualConvFrontEnd(in_channels=in_channels, out_channels=cnn_channels)
+        else:
+            raise ValueError(f"Unsupported frontend_type: {frontend_type}")
+
         reduced_features = n_features // 4
         if reduced_features < 1:
             raise ValueError(f"n_features must be >= 4, got {n_features}")
@@ -135,8 +198,26 @@ class BidirectionalMambaSER(nn.Module):
         )
 
         self.dropout = nn.Dropout(dropout)
+        if fusion_type == "gated":
+            self.fusion_gate = nn.Linear(d_model * 2, d_model)
+            fused_dim = d_model
+        elif fusion_type == "concat":
+            self.fusion_gate = None
+            fused_dim = d_model * 2
+        else:
+            raise ValueError(f"Unsupported fusion_type: {fusion_type}")
+
+        if pooling_type == "attention":
+            self.attn_pool = nn.Linear(fused_dim, 1)
+            pooled_dim = fused_dim
+        elif pooling_type == "meanmax":
+            self.attn_pool = None
+            pooled_dim = fused_dim * 2
+        else:
+            raise ValueError(f"Unsupported pooling_type: {pooling_type}")
+
         self.classifier = nn.Sequential(
-            nn.Linear(d_model * 4, d_model * 2),
+            nn.Linear(pooled_dim, d_model * 2),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model * 2, num_classes),
@@ -182,16 +263,19 @@ class BidirectionalMambaSER(nn.Module):
             x, self.bwd_blocks, self.bwd_norms, reverse=True
         )
 
-        # Flatten sequence representation via pooled summaries from both directions
-        pooled = torch.cat(
-            [
-                x_fwd.mean(dim=1),
-                x_fwd.max(dim=1).values,
-                x_bwd.mean(dim=1),
-                x_bwd.max(dim=1).values,
-            ],
-            dim=1,
-        )
+        if self.fusion_type == "gated":
+            gate = torch.sigmoid(self.fusion_gate(torch.cat([x_fwd, x_bwd], dim=-1)))
+            seq = gate * x_fwd + (1.0 - gate) * x_bwd
+        else:
+            seq = torch.cat([x_fwd, x_bwd], dim=-1)
+
+        if self.pooling_type == "attention":
+            attn_logits = self.attn_pool(seq).squeeze(-1)  # (B, T)
+            attn = torch.softmax(attn_logits, dim=1).unsqueeze(-1)  # (B, T, 1)
+            pooled = (seq * attn).sum(dim=1)
+        else:
+            pooled = torch.cat([seq.mean(dim=1), seq.max(dim=1).values], dim=1)
+
         return self.classifier(pooled)
 
     def count_parameters(self):

@@ -250,7 +250,7 @@ def validate(
     return total_loss / total, correct / total, val_f1
 
 
-def sample_coupled_config(trial: optuna.Trial) -> Dict[str, float | int]:
+def sample_coupled_config(trial: optuna.Trial) -> Dict[str, float | int | str]:
     # Capacity first
     d_model = trial.suggest_categorical("mamba_d_model", [64, 96, 128])
     cnn_channels = trial.suggest_categorical("cnn_channels", [32, 48, 64])
@@ -258,6 +258,9 @@ def sample_coupled_config(trial: optuna.Trial) -> Dict[str, float | int]:
     num_layers = trial.suggest_int("num_layers", 1, 3)
     mamba_expand = trial.suggest_categorical("mamba_expand", [2, 4])
     mamba_d_conv = trial.suggest_categorical("mamba_d_conv", [3, 4, 5])
+    frontend_type = trial.suggest_categorical("frontend_type", ["basic_cnn", "residual_cnn"])
+    fusion_type = trial.suggest_categorical("fusion_type", ["concat", "gated"])
+    pooling_type = trial.suggest_categorical("pooling_type", ["meanmax", "attention"])
 
     capacity_score = 0
     if d_model >= 128:
@@ -302,6 +305,9 @@ def sample_coupled_config(trial: optuna.Trial) -> Dict[str, float | int]:
         "num_layers": num_layers,
         "mamba_expand": mamba_expand,
         "mamba_d_conv": mamba_d_conv,
+        "frontend_type": frontend_type,
+        "fusion_type": fusion_type,
+        "pooling_type": pooling_type,
         "dropout": dropout,
         "weight_decay": weight_decay,
         "label_smoothing": label_smoothing,
@@ -345,6 +351,9 @@ def build_objective(
             expand=int(config["mamba_expand"]),
             num_layers=int(config["num_layers"]),
             dropout=float(config["dropout"]),
+            frontend_type=str(config["frontend_type"]),
+            fusion_type=str(config["fusion_type"]),
+            pooling_type=str(config["pooling_type"]),
         ).to(device)
 
         criterion = nn.CrossEntropyLoss(label_smoothing=float(config["label_smoothing"]))
@@ -489,6 +498,9 @@ def main():
         f"--num_layers {study.best_trial.params['num_layers']}",
         f"--mamba_expand {study.best_trial.params['mamba_expand']}",
         f"--mamba_d_conv {study.best_trial.params['mamba_d_conv']}",
+        f"--frontend_type {study.best_trial.params['frontend_type']}",
+        f"--fusion_type {study.best_trial.params['fusion_type']}",
+        f"--pooling_type {study.best_trial.params['pooling_type']}",
         f"--dropout {study.best_trial.params['dropout']}",
         f"--learning_rate {study.best_trial.params['learning_rate']}",
         f"--weight_decay {study.best_trial.params['weight_decay']}",

@@ -47,6 +47,9 @@ CONFIG = {
     "mamba_d_conv": 4,
     "mamba_expand": 2,
     "cnn_channels": 48,
+    "frontend_type": "basic_cnn",
+    "fusion_type": "concat",
+    "pooling_type": "meanmax",
     "batch_size":    64,
     "learning_rate": 3e-4,
     "weight_decay":  1e-4,
@@ -180,6 +183,9 @@ def main(args):
     config["mamba_d_conv"] = args.mamba_d_conv
     config["mamba_expand"] = args.mamba_expand
     config["cnn_channels"] = args.cnn_channels
+    config["frontend_type"] = args.frontend_type
+    config["fusion_type"] = args.fusion_type
+    config["pooling_type"] = args.pooling_type
     config["batch_size"] = args.batch_size
     config["learning_rate"] = args.learning_rate
     config["weight_decay"] = args.weight_decay
@@ -231,6 +237,9 @@ def main(args):
                 "mamba_d_conv": config["mamba_d_conv"],
                 "mamba_expand": config["mamba_expand"],
                 "cnn_channels": config["cnn_channels"],
+                "frontend_type": config["frontend_type"],
+                "fusion_type": config["fusion_type"],
+                "pooling_type": config["pooling_type"],
                 "weight_decay": config["weight_decay"],
                 "label_smoothing": config["label_smoothing"],
             },
@@ -251,6 +260,9 @@ def main(args):
             expand=config["mamba_expand"],
             num_layers=config["num_layers"],
             dropout=config["dropout"],
+            frontend_type=config["frontend_type"],
+            fusion_type=config["fusion_type"],
+            pooling_type=config["pooling_type"],
         ).to(device)
     elif config["model_name"] == "baseline":
         input_size = config["n_features"] * in_channels
@@ -536,6 +548,27 @@ if __name__ == "__main__":
         type=int,
         default=48,
         help="CNN front-end output channels (default: 48).",
+    )
+    parser.add_argument(
+        "--frontend_type",
+        type=str,
+        choices=["basic_cnn", "residual_cnn"],
+        default="basic_cnn",
+        help="CNN frontend variant for mamba model (default: basic_cnn).",
+    )
+    parser.add_argument(
+        "--fusion_type",
+        type=str,
+        choices=["concat", "gated"],
+        default="concat",
+        help="Bidirectional fusion strategy for mamba model (default: concat).",
+    )
+    parser.add_argument(
+        "--pooling_type",
+        type=str,
+        choices=["meanmax", "attention"],
+        default="meanmax",
+        help="Temporal pooling strategy for mamba model (default: meanmax).",
     )
     parser.add_argument(
         "--batch_size",

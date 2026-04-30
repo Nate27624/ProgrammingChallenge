@@ -211,6 +211,9 @@ def main(args):
             expand=int(model_config.get("mamba_expand", 2)),
             num_layers=int(model_config.get("num_layers", 2)),
             dropout=float(model_config.get("dropout", 0.2)),
+            frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
+            fusion_type=str(model_config.get("fusion_type", "concat")),
+            pooling_type=str(model_config.get("pooling_type", "meanmax")),
         ).to(device)
     else:
         input_size = n_features * in_channels
