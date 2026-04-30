@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -250,55 +251,153 @@ def validate(
     return total_loss / total, correct / total, val_f1
 
 
-def sample_coupled_config(trial: optuna.Trial) -> Dict[str, float | int | str]:
-    # Capacity first
-    d_model = trial.suggest_categorical("mamba_d_model", [64, 96, 128])
-    cnn_channels = trial.suggest_categorical("cnn_channels", [32, 48, 64])
-    d_state = trial.suggest_categorical("mamba_d_state", [16, 32, 64])
-    num_layers = trial.suggest_int("num_layers", 1, 3)
-    mamba_expand = trial.suggest_categorical("mamba_expand", [2, 4])
-    mamba_d_conv = trial.suggest_categorical("mamba_d_conv", [3, 4, 5])
-    frontend_type = trial.suggest_categorical("frontend_type", ["basic_cnn", "residual_cnn"])
-    fusion_type = trial.suggest_categorical("fusion_type", ["concat", "gated"])
-    pooling_type = trial.suggest_categorical("pooling_type", ["meanmax", "attention"])
+ALL_FRONTEND_TYPES = ["basic_cnn", "residual_cnn"]
+ALL_FUSION_TYPES = ["concat", "gated"]
+ALL_POOLING_TYPES = ["meanmax", "attention"]
 
-    capacity_score = 0
-    if d_model >= 128:
-        capacity_score += 1
-    if cnn_channels >= 64:
-        capacity_score += 1
-    if d_state >= 64:
-        capacity_score += 1
-    if num_layers >= 3:
-        capacity_score += 1
 
-    # Coupled regularization ranges (stronger for higher capacity)
-    if capacity_score >= 3:
-        dropout = trial.suggest_float("dropout", 0.35, 0.55)
-        weight_decay = trial.suggest_float("weight_decay", 3e-5, 3e-3, log=True)
-        label_smoothing = trial.suggest_float("label_smoothing", 0.05, 0.15)
-        num_time_masks = trial.suggest_int("num_time_masks", 2, 4)
-        time_mask_param = trial.suggest_int("time_mask_param", 24, 56, step=8)
-        num_freq_masks = trial.suggest_int("num_freq_masks", 2, 4)
-        freq_mask_param = trial.suggest_int("freq_mask_param", 8, 20, step=4)
-    elif capacity_score >= 2:
-        dropout = trial.suggest_float("dropout", 0.30, 0.50)
-        weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3, log=True)
-        label_smoothing = trial.suggest_float("label_smoothing", 0.03, 0.12)
-        num_time_masks = trial.suggest_int("num_time_masks", 2, 3)
-        time_mask_param = trial.suggest_int("time_mask_param", 20, 48, step=4)
-        num_freq_masks = trial.suggest_int("num_freq_masks", 2, 3)
-        freq_mask_param = trial.suggest_int("freq_mask_param", 6, 16, step=2)
-    else:
-        dropout = trial.suggest_float("dropout", 0.20, 0.40)
-        weight_decay = trial.suggest_float("weight_decay", 1e-6, 3e-4, log=True)
-        label_smoothing = trial.suggest_float("label_smoothing", 0.0, 0.10)
-        num_time_masks = trial.suggest_int("num_time_masks", 1, 3)
-        time_mask_param = trial.suggest_int("time_mask_param", 16, 40, step=4)
-        num_freq_masks = trial.suggest_int("num_freq_masks", 1, 3)
-        freq_mask_param = trial.suggest_int("freq_mask_param", 4, 12, step=2)
+def all_architectures() -> List[Tuple[str, str, str]]:
+    return [
+        (frontend, fusion, pooling)
+        for frontend in ALL_FRONTEND_TYPES
+        for fusion in ALL_FUSION_TYPES
+        for pooling in ALL_POOLING_TYPES
+    ]
 
-    config = {
+
+def parse_architectures(raw: str) -> List[Tuple[str, str, str]]:
+    parsed: List[Tuple[str, str, str]] = []
+    if not raw.strip():
+        return parsed
+
+    for item in raw.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        parts = token.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"Invalid architecture token '{token}'. "
+                "Expected format frontend:fusion:pooling"
+            )
+        frontend, fusion, pooling = parts
+        if frontend not in ALL_FRONTEND_TYPES:
+            raise ValueError(f"Unsupported frontend_type '{frontend}'")
+        if fusion not in ALL_FUSION_TYPES:
+            raise ValueError(f"Unsupported fusion_type '{fusion}'")
+        if pooling not in ALL_POOLING_TYPES:
+            raise ValueError(f"Unsupported pooling_type '{pooling}'")
+        parsed.append((frontend, fusion, pooling))
+
+    # Preserve order while removing duplicates
+    uniq: List[Tuple[str, str, str]] = []
+    for arch in parsed:
+        if arch not in uniq:
+            uniq.append(arch)
+    return uniq
+
+
+def resolve_architecture_from_params(params: Dict[str, object]) -> Tuple[str, str, str]:
+    if "arch_triplet" in params:
+        frontend, fusion, pooling = str(params["arch_triplet"]).split(":")
+        return frontend, fusion, pooling
+    return (
+        str(params["frontend_type"]),
+        str(params["fusion_type"]),
+        str(params["pooling_type"]),
+    )
+
+
+def select_top_architectures_from_study(
+    results_dir: Path,
+    source_study_name: str,
+    top_k: int,
+) -> List[Tuple[str, str, str]]:
+    source_dir = results_dir / "optuna" / source_study_name
+    source_db = source_dir / f"{source_study_name}.db"
+    if not source_db.exists():
+        raise FileNotFoundError(f"Stage A study db not found: {source_db}")
+
+    source_storage = f"sqlite:///{source_db.as_posix()}"
+    source_study = optuna.load_study(study_name=source_study_name, storage=source_storage)
+    complete_trials = [
+        trial
+        for trial in source_study.trials
+        if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None
+    ]
+    if not complete_trials:
+        raise RuntimeError(f"No completed trials found in source study '{source_study_name}'.")
+
+    arch_best: Dict[Tuple[str, str, str], float] = {}
+    for trial in complete_trials:
+        try:
+            arch = resolve_architecture_from_params(trial.params)
+        except Exception:
+            continue
+        best_so_far = arch_best.get(arch, float("-inf"))
+        arch_best[arch] = max(best_so_far, float(trial.value))
+
+    ranked = sorted(arch_best.items(), key=lambda x: x[1], reverse=True)
+    if not ranked:
+        raise RuntimeError(
+            f"Could not resolve architecture fields from source study '{source_study_name}'."
+        )
+    return [arch for arch, _ in ranked[:max(1, top_k)]]
+
+
+def write_architecture_ranking(study: optuna.Study, out_path: Path) -> None:
+    stats: Dict[Tuple[str, str, str], List[float]] = defaultdict(list)
+    for trial in study.trials:
+        if trial.state != optuna.trial.TrialState.COMPLETE or trial.value is None:
+            continue
+        try:
+            arch = resolve_architecture_from_params(trial.params)
+        except Exception:
+            continue
+        stats[arch].append(float(trial.value))
+
+    rows = []
+    for arch, values in stats.items():
+        rows.append(
+            {
+                "frontend_type": arch[0],
+                "fusion_type": arch[1],
+                "pooling_type": arch[2],
+                "num_trials": len(values),
+                "mean_val_f1": float(np.mean(values)),
+                "max_val_f1": float(np.max(values)),
+            }
+        )
+    rows.sort(key=lambda row: row["max_val_f1"], reverse=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2)
+
+
+def sample_stage_a_config(
+    trial: optuna.Trial,
+    args: argparse.Namespace,
+) -> Dict[str, float | int | str]:
+    frontend_type = trial.suggest_categorical("frontend_type", ALL_FRONTEND_TYPES)
+    fusion_type = trial.suggest_categorical("fusion_type", ALL_FUSION_TYPES)
+    pooling_type = trial.suggest_categorical("pooling_type", ALL_POOLING_TYPES)
+    repeat_id = trial.suggest_int("repeat_id", 0, max(args.stage_a_repeats - 1, 0))
+    d_model = trial.suggest_categorical("mamba_d_model", [96])
+    cnn_channels = trial.suggest_categorical("cnn_channels", [48])
+    d_state = trial.suggest_categorical("mamba_d_state", [32])
+    num_layers = trial.suggest_categorical("num_layers", [2])
+    mamba_expand = trial.suggest_categorical("mamba_expand", [2])
+    mamba_d_conv = trial.suggest_categorical("mamba_d_conv", [4])
+    dropout = trial.suggest_categorical("dropout", [0.35])
+    weight_decay = trial.suggest_categorical("weight_decay", [1e-4])
+    label_smoothing = trial.suggest_categorical("label_smoothing", [0.05])
+    learning_rate = trial.suggest_categorical("learning_rate", [3e-4])
+    batch_size = trial.suggest_categorical("batch_size", [64])
+    num_time_masks = trial.suggest_categorical("num_time_masks", [2])
+    time_mask_param = trial.suggest_categorical("time_mask_param", [24])
+    num_freq_masks = trial.suggest_categorical("num_freq_masks", [2])
+    freq_mask_param = trial.suggest_categorical("freq_mask_param", [8])
+
+    return {
         "mamba_d_model": d_model,
         "cnn_channels": cnn_channels,
         "mamba_d_state": d_state,
@@ -311,24 +410,116 @@ def sample_coupled_config(trial: optuna.Trial) -> Dict[str, float | int | str]:
         "dropout": dropout,
         "weight_decay": weight_decay,
         "label_smoothing": label_smoothing,
-        "learning_rate": trial.suggest_float("learning_rate", 1e-4, 8e-4, log=True),
-        "batch_size": trial.suggest_categorical("batch_size", [32, 64]),
+        "learning_rate": learning_rate,
+        "batch_size": batch_size,
         "num_time_masks": num_time_masks,
         "time_mask_param": time_mask_param,
         "num_freq_masks": num_freq_masks,
         "freq_mask_param": freq_mask_param,
+        "repeat_id": repeat_id,
     }
-    return config
+
+
+def sample_stage_b_config(
+    trial: optuna.Trial,
+    allowed_architectures: List[Tuple[str, str, str]],
+) -> Dict[str, float | int | str]:
+    arch_choices = [f"{f}:{u}:{p}" for f, u, p in allowed_architectures]
+    arch_triplet = trial.suggest_categorical("arch_triplet", arch_choices)
+    frontend_type, fusion_type, pooling_type = arch_triplet.split(":")
+
+    # Focused capacity search (removes weak low-width region)
+    d_model = trial.suggest_categorical("mamba_d_model", [96, 128])
+    cnn_channels = trial.suggest_categorical("cnn_channels", [48, 64])
+    d_state = trial.suggest_categorical("mamba_d_state", [32, 64])
+    num_layers = trial.suggest_int("num_layers", 2, 3)
+    mamba_expand = trial.suggest_categorical("mamba_expand", [2, 4])
+    mamba_d_conv = trial.suggest_categorical("mamba_d_conv", [3, 4, 5])
+
+    capacity_score = 0
+    if d_model >= 128:
+        capacity_score += 1
+    if cnn_channels >= 64:
+        capacity_score += 1
+    if d_state >= 64:
+        capacity_score += 1
+    if num_layers >= 3:
+        capacity_score += 1
+
+    # Coupled regularization (stronger for larger models)
+    if capacity_score >= 3:
+        dropout_min, dropout_max = 0.38, 0.60
+        wd_min, wd_max = 5e-5, 3e-3
+        ls_min, ls_max = 0.06, 0.16
+        tm_lo, tm_hi, tm_step = 24, 56, 8
+        fm_lo, fm_hi, fm_step = 8, 20, 4
+        tmask_min, tmask_max = 2, 4
+        fmask_min, fmask_max = 2, 4
+    elif capacity_score >= 2:
+        dropout_min, dropout_max = 0.33, 0.53
+        wd_min, wd_max = 2e-5, 1.5e-3
+        ls_min, ls_max = 0.04, 0.13
+        tm_lo, tm_hi, tm_step = 20, 48, 4
+        fm_lo, fm_hi, fm_step = 6, 16, 2
+        tmask_min, tmask_max = 2, 3
+        fmask_min, fmask_max = 2, 3
+    else:
+        dropout_min, dropout_max = 0.25, 0.45
+        wd_min, wd_max = 1e-5, 5e-4
+        ls_min, ls_max = 0.01, 0.10
+        tm_lo, tm_hi, tm_step = 16, 40, 4
+        fm_lo, fm_hi, fm_step = 4, 12, 2
+        tmask_min, tmask_max = 1, 3
+        fmask_min, fmask_max = 1, 3
+
+    # Attention pooling tends to overfit more easily; raise regularization floor.
+    if pooling_type == "attention":
+        dropout_min = max(dropout_min, 0.35)
+        ls_min = max(ls_min, 0.03)
+
+    dropout = trial.suggest_float("dropout", dropout_min, dropout_max)
+    weight_decay = trial.suggest_float("weight_decay", wd_min, wd_max, log=True)
+    label_smoothing = trial.suggest_float("label_smoothing", ls_min, ls_max)
+
+    return {
+        "mamba_d_model": d_model,
+        "cnn_channels": cnn_channels,
+        "mamba_d_state": d_state,
+        "num_layers": num_layers,
+        "mamba_expand": mamba_expand,
+        "mamba_d_conv": mamba_d_conv,
+        "frontend_type": frontend_type,
+        "fusion_type": fusion_type,
+        "pooling_type": pooling_type,
+        "arch_triplet": arch_triplet,
+        "dropout": dropout,
+        "weight_decay": weight_decay,
+        "label_smoothing": label_smoothing,
+        "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [32, 64]),
+        "num_time_masks": trial.suggest_int("num_time_masks", tmask_min, tmask_max),
+        "time_mask_param": trial.suggest_int("time_mask_param", tm_lo, tm_hi, step=tm_step),
+        "num_freq_masks": trial.suggest_int("num_freq_masks", fmask_min, fmask_max),
+        "freq_mask_param": trial.suggest_int("freq_mask_param", fm_lo, fm_hi, step=fm_step),
+    }
 
 
 def build_objective(
     bundle: DataBundle,
     device: torch.device,
     args: argparse.Namespace,
+    allowed_architectures: List[Tuple[str, str, str]],
 ):
     def objective(trial: optuna.Trial) -> float:
-        config = sample_coupled_config(trial)
-        set_global_seed(args.seed + trial.number)
+        if args.mode == "stage_a":
+            config = sample_stage_a_config(trial, args)
+        elif args.mode == "stage_b":
+            config = sample_stage_b_config(trial, allowed_architectures)
+        else:
+            raise ValueError(f"Unsupported mode: {args.mode}")
+
+        repeat_offset = int(config.get("repeat_id", 0)) * 1000
+        set_global_seed(args.seed + trial.number + repeat_offset)
 
         train_loader, val_loader = make_dataloaders_for_trial(
             bundle=bundle,
@@ -411,6 +602,14 @@ def main():
     parser.add_argument("--data_dir", type=str, default="dataset")
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--study_name", type=str, default="mamba_phase3")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["stage_a", "stage_b"],
+        default="stage_b",
+        help="stage_a: architecture shortlist with fixed training config; "
+        "stage_b: focused coupled capacity/regularization search.",
+    )
     parser.add_argument("--storage", type=str, default=None,
                         help="Optuna storage URI, e.g. sqlite:///results/optuna/mamba_phase3.db")
     parser.add_argument("--n_trials", type=int, default=50)
@@ -424,6 +623,31 @@ def main():
     parser.add_argument("--val_split", type=float, default=0.15)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--stage_a_repeats",
+        type=int,
+        default=2,
+        help="How many random-seed repeats per architecture in stage_a.",
+    )
+    parser.add_argument(
+        "--stage_b_architectures",
+        type=str,
+        default="",
+        help="Comma list of architecture triplets for stage_b, e.g. "
+        "'basic_cnn:concat:meanmax,residual_cnn:gated:attention'.",
+    )
+    parser.add_argument(
+        "--stage_b_from_study",
+        type=str,
+        default="",
+        help="Use top architectures from an existing stage_a study name.",
+    )
+    parser.add_argument(
+        "--stage_b_top_k",
+        type=int,
+        default=2,
+        help="Number of top architectures to import from --stage_b_from_study.",
+    )
     args = parser.parse_args()
 
     set_global_seed(args.seed)
@@ -449,12 +673,35 @@ def main():
         random_seed=args.seed,
     )
 
-    sampler = optuna.samplers.TPESampler(seed=args.seed)
-    pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=5,
-        n_warmup_steps=6,
-        interval_steps=1,
-    )
+    allowed_architectures = all_architectures()
+    if args.mode == "stage_b":
+        if args.stage_b_architectures.strip():
+            allowed_architectures = parse_architectures(args.stage_b_architectures)
+        elif args.stage_b_from_study.strip():
+            allowed_architectures = select_top_architectures_from_study(
+                results_dir=results_dir,
+                source_study_name=args.stage_b_from_study.strip(),
+                top_k=args.stage_b_top_k,
+            )
+        print(f"Stage B architecture pool: {allowed_architectures}")
+
+    if args.mode == "stage_a":
+        grid_space = {
+            "frontend_type": ALL_FRONTEND_TYPES,
+            "fusion_type": ALL_FUSION_TYPES,
+            "pooling_type": ALL_POOLING_TYPES,
+            "repeat_id": list(range(max(args.stage_a_repeats, 1))),
+        }
+        sampler = optuna.samplers.GridSampler(grid_space)
+        pruner = optuna.pruners.NopPruner()
+    else:
+        sampler = optuna.samplers.TPESampler(seed=args.seed)
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=5,
+            n_warmup_steps=6,
+            interval_steps=1,
+        )
+
     study = optuna.create_study(
         study_name=args.study_name,
         direction="maximize",
@@ -464,23 +711,45 @@ def main():
         pruner=pruner,
     )
 
-    print(
-        f"Starting Optuna study '{args.study_name}' with n_trials={args.n_trials}, "
-        f"max_epochs={args.max_epochs}, early_stop_patience={args.early_stop_patience}"
+    if args.mode == "stage_a":
+        total_grid = 2 * 2 * 2 * max(args.stage_a_repeats, 1)
+        effective_trials = min(args.n_trials, total_grid)
+        print(
+            f"Starting Stage A study '{args.study_name}' "
+            f"with total_grid={total_grid}, n_trials={effective_trials}, "
+            f"max_epochs={args.max_epochs}, early_stop_patience={args.early_stop_patience}"
+        )
+    else:
+        effective_trials = args.n_trials
+        print(
+            f"Starting Stage B study '{args.study_name}' with n_trials={effective_trials}, "
+            f"max_epochs={args.max_epochs}, early_stop_patience={args.early_stop_patience}"
+        )
+    objective = build_objective(
+        bundle=bundle,
+        device=device,
+        args=args,
+        allowed_architectures=allowed_architectures,
     )
-    objective = build_objective(bundle=bundle, device=device, args=args)
-    study.optimize(objective, n_trials=args.n_trials, timeout=args.timeout, gc_after_trial=True)
+    study.optimize(objective, n_trials=effective_trials, timeout=args.timeout, gc_after_trial=True)
 
+    best_arch = resolve_architecture_from_params(study.best_trial.params)
     best = {
         "best_trial_number": study.best_trial.number,
         "best_val_f1": study.best_value,
         "best_params": study.best_trial.params,
+        "best_architecture": {
+            "frontend_type": best_arch[0],
+            "fusion_type": best_arch[1],
+            "pooling_type": best_arch[2],
+        },
     }
     with open(out_dir / "best_params.json", "w", encoding="utf-8") as f:
         json.dump(best, f, indent=2)
 
     trials_df = study.trials_dataframe()
     trials_df.to_csv(out_dir / "trials.csv", index=False)
+    write_architecture_ranking(study, out_dir / "architecture_ranking.json")
 
     retrain_cmd = [
         "python train.py",
@@ -498,9 +767,9 @@ def main():
         f"--num_layers {study.best_trial.params['num_layers']}",
         f"--mamba_expand {study.best_trial.params['mamba_expand']}",
         f"--mamba_d_conv {study.best_trial.params['mamba_d_conv']}",
-        f"--frontend_type {study.best_trial.params['frontend_type']}",
-        f"--fusion_type {study.best_trial.params['fusion_type']}",
-        f"--pooling_type {study.best_trial.params['pooling_type']}",
+        f"--frontend_type {best_arch[0]}",
+        f"--fusion_type {best_arch[1]}",
+        f"--pooling_type {best_arch[2]}",
         f"--dropout {study.best_trial.params['dropout']}",
         f"--learning_rate {study.best_trial.params['learning_rate']}",
         f"--weight_decay {study.best_trial.params['weight_decay']}",
@@ -517,6 +786,7 @@ def main():
     print("\nStudy complete.")
     print(f"Best trial: {study.best_trial.number}")
     print(f"Best val_f1: {study.best_value:.4f}")
+    print(f"Best architecture: frontend={best_arch[0]}, fusion={best_arch[1]}, pooling={best_arch[2]}")
     print(f"Artifacts written to: {out_dir}")
     print(f"Retrain command saved to: {out_dir / 'retrain_command.txt'}")
 
