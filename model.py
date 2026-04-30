@@ -11,6 +11,15 @@ from dataloader import EMOTION_LABELS
 
 def _resolve_mamba_block_factory():
     try:
+        from mamba_minimal import MambaMinimalBlock  # type: ignore
+
+        return lambda d_model, d_state, d_conv, expand: MambaMinimalBlock(
+            d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand
+        )
+    except ImportError:
+        pass
+
+    try:
         from mamba_ssm import Mamba  # type: ignore
         return lambda d_model, d_state, d_conv, expand: Mamba(
             d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand
@@ -40,8 +49,9 @@ def _resolve_mamba_block_factory():
             except ImportError as exc:
                 raise ImportError(
                     "No compatible Mamba backend found. Install one of:\n"
-                    "1) pip install mamba-ssm causal-conv1d\n"
-                    "2) pip install mambapy"
+                    "1) local mamba_minimal.py in this repository\n"
+                    "2) pip install mamba-ssm causal-conv1d\n"
+                    "3) pip install mambapy"
                 ) from exc
 
 
