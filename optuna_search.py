@@ -153,6 +153,7 @@ def make_dataloaders_for_trial(
     num_freq_masks: int,
     freq_mask_param: int,
 ) -> Tuple[DataLoader, DataLoader]:
+    pin_memory = torch.cuda.is_available()
     train_dataset = SpeechEmotionDataset(
         audio_dir=bundle.train_dir / "audio",
         labels_csv=bundle.train_dir / "train_labels.csv",
@@ -187,14 +188,14 @@ def make_dataloaders_for_trial(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         val_subset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     return train_loader, val_loader
 
@@ -205,6 +206,8 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    scaler: torch.amp.GradScaler,
+    amp_enabled: bool,
 ) -> Tuple[float, float]:
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -212,10 +215,12 @@ def train_one_epoch(
     for specs, labels in loader:
         specs, labels = specs.to(device), labels.to(device)
         optimizer.zero_grad()
-        logits = model(specs)
-        loss = criterion(logits, labels)
-        loss.backward()
-        optimizer.step()
+        with torch.autocast(device_type=device.type, enabled=amp_enabled):
+            logits = model(specs)
+            loss = criterion(logits, labels)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item() * specs.size(0)
         correct += (logits.argmax(dim=1) == labels).sum().item()
@@ -229,6 +234,7 @@ def validate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    amp_enabled: bool,
 ) -> Tuple[float, float, float]:
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
@@ -237,8 +243,9 @@ def validate(
     with torch.no_grad():
         for specs, labels in loader:
             specs, labels = specs.to(device), labels.to(device)
-            logits = model(specs)
-            loss = criterion(logits, labels)
+            with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                logits = model(specs)
+                loss = criterion(logits, labels)
             preds = logits.argmax(dim=1)
 
             total_loss += loss.item() * specs.size(0)
@@ -556,41 +563,55 @@ def build_objective(
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=args.patience_lr
         )
+        amp_enabled = bool(args.amp and device.type == "cuda")
+        scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
         best_val_f1 = float("-inf")
         best_val_loss = float("inf")
         patience_counter = 0
 
-        for epoch in range(args.max_epochs):
-            train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, device
-            )
-            val_loss, val_acc, val_f1 = validate(
-                model, val_loader, criterion, device
-            )
-            scheduler.step(val_loss)
+        try:
+            for epoch in range(args.max_epochs):
+                train_loss, train_acc = train_one_epoch(
+                    model, train_loader, criterion, optimizer, device, scaler, amp_enabled
+                )
+                val_loss, val_acc, val_f1 = validate(
+                    model, val_loader, criterion, device, amp_enabled
+                )
+                scheduler.step(val_loss)
 
-            trial.report(val_f1, step=epoch)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
+                trial.report(val_f1, step=epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
 
-            is_better_f1 = val_f1 > best_val_f1 + 1e-6
-            is_tie_better_loss = abs(val_f1 - best_val_f1) <= 1e-6 and val_loss < best_val_loss
-            if is_better_f1 or is_tie_better_loss:
-                best_val_f1 = val_f1
-                best_val_loss = val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= args.early_stop_patience:
-                    break
+                is_better_f1 = val_f1 > best_val_f1 + 1e-6
+                is_tie_better_loss = abs(val_f1 - best_val_f1) <= 1e-6 and val_loss < best_val_loss
+                if is_better_f1 or is_tie_better_loss:
+                    best_val_f1 = val_f1
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= args.early_stop_patience:
+                        break
 
-            print(
-                f"[trial {trial.number:03d}] "
-                f"epoch {epoch+1:02d}/{args.max_epochs} "
-                f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
-                f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f}"
-            )
+                print(
+                    f"[trial {trial.number:03d}] "
+                    f"epoch {epoch+1:02d}/{args.max_epochs} "
+                    f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
+                    f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f}"
+                )
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower():
+                print(f"[trial {trial.number:03d}] OOM encountered; pruning trial.")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                raise optuna.TrialPruned() from exc
+            raise
+        finally:
+            del model, optimizer, scheduler, scaler, train_loader, val_loader
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         return best_val_f1
 
@@ -623,6 +644,18 @@ def main():
     parser.add_argument("--val_split", type=float, default=0.15)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        default=True,
+        help="Enable mixed precision on CUDA (default: enabled).",
+    )
+    parser.add_argument(
+        "--no_amp",
+        action="store_false",
+        dest="amp",
+        help="Disable mixed precision.",
+    )
     parser.add_argument(
         "--stage_a_repeats",
         type=int,
