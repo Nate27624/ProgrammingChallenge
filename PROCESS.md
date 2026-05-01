@@ -272,3 +272,28 @@ Immediate next step:
 1. Run `stage_b_bias_variance.py` on `mamba_stage_b_recipe` top trials.
 2. Retrain top 2 robust configs.
 3. Ensemble top 2 if close.
+
+## 13. Opus Recommendation Integration (2026-05-01)
+
+Reviewed recommendation set and implemented high-confidence, low-risk items directly:
+
+- Switched optimizers from `Adam` to `AdamW` (decoupled weight decay) in:
+  - `train.py`
+  - `optuna_search.py`
+  - `stage_b_bias_variance.py`
+- Added gradient clipping (`max_grad_norm`, default `1.0`) in:
+  - `train.py`
+  - `optuna_search.py` (with AMP-safe unscale before clipping)
+  - propagated through rerank/retrain command generation
+- Added `drop_last=True` for **training** DataLoaders in:
+  - `dataloader.py`
+  - `optuna_search.py` trial loaders
+- Added peak waveform normalization in `SpeechEmotionDataset` before feature extraction.
+
+Status of other suggested items:
+
+- Not yet implemented:
+  - waveform speed perturbation
+  - spectrogram mixup
+  - stochastic weight averaging (SWA)
+- Reason: these are higher-touch changes that are best introduced one at a time after measuring impact from the above stability/regularization fixes.
