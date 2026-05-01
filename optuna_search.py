@@ -703,152 +703,181 @@ def build_objective(
             config["freq_mask_param"] = min(6, int(config["freq_mask_param"]))
 
         repeat_offset = int(config.get("repeat_id", 0)) * 1000
-        set_global_seed(args.seed + trial.number + repeat_offset)
-        print(
-            f"[trial {trial.number:03d}] setup "
-            f"arch={config.get('arch_triplet', 'stage_a')} "
-            f"bs={config['batch_size']} speed_p={float(config['speed_perturb_prob']):.2f} "
-            f"mixup_p={float(config['mixup_prob']):.2f}"
-        )
-        setup_t0 = time.perf_counter()
+        stage_b_repeats = max(1, int(args.stage_b_repeats)) if args.mode == "stage_b" else 1
+        repeat_stride = max(1, int(args.stage_b_repeat_seed_stride))
+        repeat_best_f1s: list[float] = []
+        repeat_best_losses: list[float] = []
 
-        train_loader, val_loader = make_dataloaders_for_trial(
-            bundle=bundle,
-            batch_size=int(config["batch_size"]),
-            include_deltas=True,
-            num_workers=args.num_workers,
-            num_time_masks=int(config["num_time_masks"]),
-            time_mask_param=int(config["time_mask_param"]),
-            num_freq_masks=int(config["num_freq_masks"]),
-            freq_mask_param=int(config["freq_mask_param"]),
-            speed_perturb_prob=float(config["speed_perturb_prob"]),
-            speed_perturb_min=float(config["speed_perturb_min"]),
-            speed_perturb_max=float(config["speed_perturb_max"]),
-        )
-        setup_t1 = time.perf_counter()
-        print(
-            f"[trial {trial.number:03d}] dataloaders ready "
-            f"(train_batches={len(train_loader)}, val_batches={len(val_loader)}, "
-            f"setup_sec={setup_t1 - setup_t0:.1f})"
-        )
-
-        model = BidirectionalMambaSER(
-            in_channels=3,
-            n_features=args.n_features,
-            cnn_channels=int(config["cnn_channels"]),
-            d_model=int(config["mamba_d_model"]),
-            d_state=int(config["mamba_d_state"]),
-            d_conv=int(config["mamba_d_conv"]),
-            expand=int(config["mamba_expand"]),
-            num_layers=int(config["num_layers"]),
-            dropout=float(config["dropout"]),
-            frontend_type=str(config["frontend_type"]),
-            fusion_type=str(config["fusion_type"]),
-            pooling_type=str(config["pooling_type"]),
-        ).to(device)
-
-        class_weights = None
-        if bool(config["class_weighting"]):
-            class_weights = build_class_weights_from_bundle(bundle, device)
-
-        if str(config["loss_type"]) == "ce":
-            criterion = nn.CrossEntropyLoss(
-                weight=class_weights,
-                label_smoothing=float(config["label_smoothing"]),
+        for repeat_idx in range(stage_b_repeats):
+            run_seed = args.seed + trial.number + repeat_offset + (repeat_idx * repeat_stride)
+            set_global_seed(run_seed)
+            print(
+                f"[trial {trial.number:03d}|repeat {repeat_idx+1}/{stage_b_repeats}] setup "
+                f"arch={config.get('arch_triplet', 'stage_a')} "
+                f"bs={config['batch_size']} speed_p={float(config['speed_perturb_prob']):.2f} "
+                f"mixup_p={float(config['mixup_prob']):.2f} seed={run_seed}"
             )
-        elif str(config["loss_type"]) == "focal":
-            criterion = FocalLoss(
-                gamma=float(config["focal_gamma"]),
-                class_weights=class_weights,
-                label_smoothing=float(config["label_smoothing"]),
-            )
-        else:
-            raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
+            setup_t0 = time.perf_counter()
 
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=float(config["learning_rate"]),
-            weight_decay=float(config["weight_decay"]),
-        )
-        if str(config["scheduler_type"]) == "plateau":
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=0.5, patience=args.patience_lr
+            train_loader, val_loader = make_dataloaders_for_trial(
+                bundle=bundle,
+                batch_size=int(config["batch_size"]),
+                include_deltas=True,
+                num_workers=args.num_workers,
+                num_time_masks=int(config["num_time_masks"]),
+                time_mask_param=int(config["time_mask_param"]),
+                num_freq_masks=int(config["num_freq_masks"]),
+                freq_mask_param=int(config["freq_mask_param"]),
+                speed_perturb_prob=float(config["speed_perturb_prob"]),
+                speed_perturb_min=float(config["speed_perturb_min"]),
+                speed_perturb_max=float(config["speed_perturb_max"]),
             )
-        else:
-            lr_lambda = build_lr_lambda(
-                schedule_type=str(config["scheduler_type"]),
-                max_epochs=args.max_epochs,
-                warmup_epochs=int(config["warmup_epochs"]),
-                min_lr_ratio=float(config["min_lr_ratio"]),
+            setup_t1 = time.perf_counter()
+            print(
+                f"[trial {trial.number:03d}|repeat {repeat_idx+1}/{stage_b_repeats}] dataloaders ready "
+                f"(train_batches={len(train_loader)}, val_batches={len(val_loader)}, "
+                f"setup_sec={setup_t1 - setup_t0:.1f})"
             )
-            scheduler = torch.optim.lr_scheduler.LambdaLR(
-                optimizer, lr_lambda=lr_lambda
-            )
-        amp_enabled = bool(args.amp and device.type == "cuda")
-        scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
-        best_val_f1 = float("-inf")
-        best_val_loss = float("inf")
-        patience_counter = 0
+            model = BidirectionalMambaSER(
+                in_channels=3,
+                n_features=args.n_features,
+                cnn_channels=int(config["cnn_channels"]),
+                d_model=int(config["mamba_d_model"]),
+                d_state=int(config["mamba_d_state"]),
+                d_conv=int(config["mamba_d_conv"]),
+                expand=int(config["mamba_expand"]),
+                num_layers=int(config["num_layers"]),
+                dropout=float(config["dropout"]),
+                frontend_type=str(config["frontend_type"]),
+                fusion_type=str(config["fusion_type"]),
+                pooling_type=str(config["pooling_type"]),
+            ).to(device)
 
-        try:
-            for epoch in range(args.max_epochs):
-                epoch_t0 = time.perf_counter()
-                train_loss, train_acc = train_one_epoch(
-                    model,
-                    train_loader,
-                    criterion,
-                    optimizer,
-                    device,
-                    scaler,
-                    amp_enabled,
-                    max_grad_norm=float(config["max_grad_norm"]),
-                    mixup_alpha=float(config["mixup_alpha"]),
-                    mixup_prob=float(config["mixup_prob"]),
+            class_weights = None
+            if bool(config["class_weighting"]):
+                class_weights = build_class_weights_from_bundle(bundle, device)
+
+            if str(config["loss_type"]) == "ce":
+                criterion = nn.CrossEntropyLoss(
+                    weight=class_weights,
+                    label_smoothing=float(config["label_smoothing"]),
                 )
-                val_loss, val_acc, val_f1 = validate(
-                    model, val_loader, criterion, device, amp_enabled
+            elif str(config["loss_type"]) == "focal":
+                criterion = FocalLoss(
+                    gamma=float(config["focal_gamma"]),
+                    class_weights=class_weights,
+                    label_smoothing=float(config["label_smoothing"]),
                 )
-                if str(config["scheduler_type"]) == "plateau":
-                    scheduler.step(val_loss)
-                else:
-                    scheduler.step()
+            else:
+                raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
 
-                trial.report(val_f1, step=epoch)
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
-
-                is_better_f1 = val_f1 > best_val_f1 + 1e-6
-                is_tie_better_loss = abs(val_f1 - best_val_f1) <= 1e-6 and val_loss < best_val_loss
-                if is_better_f1 or is_tie_better_loss:
-                    best_val_f1 = val_f1
-                    best_val_loss = val_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= args.early_stop_patience:
-                        break
-
-                print(
-                    f"[trial {trial.number:03d}] "
-                    f"epoch {epoch+1:02d}/{args.max_epochs} "
-                    f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
-                    f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
-                    f"epoch_sec={time.perf_counter() - epoch_t0:.1f}"
+            optimizer = torch.optim.AdamW(
+                model.parameters(),
+                lr=float(config["learning_rate"]),
+                weight_decay=float(config["weight_decay"]),
+            )
+            if str(config["scheduler_type"]) == "plateau":
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode="min", factor=0.5, patience=args.patience_lr
                 )
-        except RuntimeError as exc:
-            if "out of memory" in str(exc).lower():
-                print(f"[trial {trial.number:03d}] OOM encountered; pruning trial.")
+            else:
+                lr_lambda = build_lr_lambda(
+                    schedule_type=str(config["scheduler_type"]),
+                    max_epochs=args.max_epochs,
+                    warmup_epochs=int(config["warmup_epochs"]),
+                    min_lr_ratio=float(config["min_lr_ratio"]),
+                )
+                scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    optimizer, lr_lambda=lr_lambda
+                )
+            amp_enabled = bool(args.amp and device.type == "cuda")
+            scaler = torch.amp.GradScaler(enabled=amp_enabled)
+
+            best_val_f1 = float("-inf")
+            best_val_loss = float("inf")
+            patience_counter = 0
+
+            try:
+                for epoch in range(args.max_epochs):
+                    epoch_t0 = time.perf_counter()
+                    train_loss, train_acc = train_one_epoch(
+                        model,
+                        train_loader,
+                        criterion,
+                        optimizer,
+                        device,
+                        scaler,
+                        amp_enabled,
+                        max_grad_norm=float(config["max_grad_norm"]),
+                        mixup_alpha=float(config["mixup_alpha"]),
+                        mixup_prob=float(config["mixup_prob"]),
+                    )
+                    val_loss, val_acc, val_f1 = validate(
+                        model, val_loader, criterion, device, amp_enabled
+                    )
+                    if str(config["scheduler_type"]) == "plateau":
+                        scheduler.step(val_loss)
+                    else:
+                        scheduler.step()
+
+                    report_step = repeat_idx * args.max_epochs + epoch
+                    trial.report(val_f1, step=report_step)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
+
+                    is_better_f1 = val_f1 > best_val_f1 + 1e-6
+                    is_tie_better_loss = abs(val_f1 - best_val_f1) <= 1e-6 and val_loss < best_val_loss
+                    if is_better_f1 or is_tie_better_loss:
+                        best_val_f1 = val_f1
+                        best_val_loss = val_loss
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= args.early_stop_patience:
+                            break
+
+                    print(
+                        f"[trial {trial.number:03d}|repeat {repeat_idx+1}/{stage_b_repeats}] "
+                        f"epoch {epoch+1:02d}/{args.max_epochs} "
+                        f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
+                        f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
+                        f"epoch_sec={time.perf_counter() - epoch_t0:.1f}"
+                    )
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower():
+                    print(f"[trial {trial.number:03d}|repeat {repeat_idx+1}/{stage_b_repeats}] OOM encountered; pruning trial.")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    raise optuna.TrialPruned() from exc
+                raise
+            finally:
+                del model, optimizer, scheduler, scaler, train_loader, val_loader
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                raise optuna.TrialPruned() from exc
-            raise
-        finally:
-            del model, optimizer, scheduler, scaler, train_loader, val_loader
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
-        return best_val_f1
+            repeat_best_f1s.append(float(best_val_f1))
+            repeat_best_losses.append(float(best_val_loss))
+            print(
+                f"[trial {trial.number:03d}|repeat {repeat_idx+1}/{stage_b_repeats}] "
+                f"best_val_f1={best_val_f1:.4f} best_val_loss={best_val_loss:.4f}"
+            )
+
+        mean_f1 = float(np.mean(repeat_best_f1s))
+        std_f1 = float(np.std(repeat_best_f1s)) if len(repeat_best_f1s) > 1 else 0.0
+        robust_score = mean_f1 - float(args.stage_b_repeat_lambda) * std_f1
+        trial.set_user_attr("repeat_best_f1s", repeat_best_f1s)
+        trial.set_user_attr("repeat_best_losses", repeat_best_losses)
+        trial.set_user_attr("repeat_mean_f1", mean_f1)
+        trial.set_user_attr("repeat_std_f1", std_f1)
+        trial.set_user_attr("repeat_robust_score", robust_score)
+        print(
+            f"[trial {trial.number:03d}] summary "
+            f"mean_f1={mean_f1:.4f} std_f1={std_f1:.4f} "
+            f"robust_score={robust_score:.4f} repeats={stage_b_repeats}"
+        )
+
+        return robust_score if args.mode == "stage_b" else mean_f1
 
     return objective
 
@@ -927,6 +956,24 @@ def main():
         action="store_true",
         help="Use lightweight augmentation settings to quickly validate trial progress/logging.",
     )
+    parser.add_argument(
+        "--stage_b_repeats",
+        type=int,
+        default=1,
+        help="Number of seed repeats per Stage B trial (default: 1).",
+    )
+    parser.add_argument(
+        "--stage_b_repeat_lambda",
+        type=float,
+        default=0.5,
+        help="Robust score lambda for Stage B repeats: mean_f1 - lambda * std_f1 (default: 0.5).",
+    )
+    parser.add_argument(
+        "--stage_b_repeat_seed_stride",
+        type=int,
+        default=1000,
+        help="Seed offset between Stage B repeats (default: 1000).",
+    )
     args = parser.parse_args()
 
     set_global_seed(args.seed)
@@ -1002,7 +1049,8 @@ def main():
         effective_trials = args.n_trials
         print(
             f"Starting Stage B study '{args.study_name}' with n_trials={effective_trials}, "
-            f"max_epochs={args.max_epochs}, early_stop_patience={args.early_stop_patience}"
+            f"max_epochs={args.max_epochs}, early_stop_patience={args.early_stop_patience}, "
+            f"repeats={max(1, args.stage_b_repeats)}, repeat_lambda={args.stage_b_repeat_lambda}"
         )
     objective = build_objective(
         bundle=bundle,
@@ -1013,9 +1061,15 @@ def main():
     study.optimize(objective, n_trials=effective_trials, timeout=args.timeout, gc_after_trial=True)
 
     best_arch = resolve_architecture_from_params(study.best_trial.params)
+    best_repeat_mean = study.best_trial.user_attrs.get("repeat_mean_f1")
+    best_repeat_std = study.best_trial.user_attrs.get("repeat_std_f1")
+    best_repeat_score = study.best_trial.user_attrs.get("repeat_robust_score")
     best = {
         "best_trial_number": study.best_trial.number,
-        "best_val_f1": study.best_value,
+        "best_objective_value": study.best_value,
+        "best_repeat_mean_f1": best_repeat_mean,
+        "best_repeat_std_f1": best_repeat_std,
+        "best_repeat_robust_score": best_repeat_score,
         "best_params": study.best_trial.params,
         "best_architecture": {
             "frontend_type": best_arch[0],
@@ -1077,7 +1131,13 @@ def main():
 
     print("\nStudy complete.")
     print(f"Best trial: {study.best_trial.number}")
-    print(f"Best val_f1: {study.best_value:.4f}")
+    if args.mode == "stage_b" and max(1, args.stage_b_repeats) > 1:
+        print(
+            f"Best robust score: {study.best_value:.4f} "
+            f"(mean_f1={best_repeat_mean:.4f}, std_f1={best_repeat_std:.4f})"
+        )
+    else:
+        print(f"Best val_f1: {study.best_value:.4f}")
     print(f"Best architecture: frontend={best_arch[0]}, fusion={best_arch[1]}, pooling={best_arch[2]}")
     print(f"Artifacts written to: {out_dir}")
     print(f"Retrain command saved to: {out_dir / 'retrain_command.txt'}")

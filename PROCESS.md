@@ -308,6 +308,24 @@ Rationale:
 - Increase generalization pressure with stronger augmentation/regularization coupling.
 - Reduce “lucky trial” risk by making reruns more reproducible.
 
+## 16. Stage B Noise-Reduction Upgrade (2026-05-01)
+
+Implemented repeat-based trial scoring in `optuna_search.py` for Stage B:
+
+- New CLI knobs:
+  - `--stage_b_repeats` (default `1`)
+  - `--stage_b_repeat_lambda` (default `0.5`)
+  - `--stage_b_repeat_seed_stride` (default `1000`)
+- Each trial can now run across multiple seeds and is scored by:
+  - `robust_score = mean_f1 - lambda * std_f1`
+- Repeat metrics are saved into trial user attributes:
+  - `repeat_mean_f1`, `repeat_std_f1`, `repeat_robust_score`
+- `best_params.json` now reports objective value + repeat mean/std explicitly.
+
+Purpose:
+
+- Reduce promotion of lucky high-noise candidates during short-epoch screening.
+
 ## 15. Optuna Throughput/Visibility Fix (2026-05-01)
 
 Observed issue:
