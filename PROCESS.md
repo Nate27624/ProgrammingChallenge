@@ -307,3 +307,27 @@ Rationale:
 - Keep proven architecture family (`basic_cnn:gated:meanmax` + BiMamba).
 - Increase generalization pressure with stronger augmentation/regularization coupling.
 - Reduce “lucky trial” risk by making reruns more reproducible.
+
+## 15. Optuna Throughput/Visibility Fix (2026-05-01)
+
+Observed issue:
+
+- Stage B runs appeared frozen (long silence after "Starting Stage B study...").
+- GPU stayed near idle while Python used CPU, indicating heavy preprocessing bottleneck.
+
+Code adjustments in `optuna_search.py`:
+
+- Reduced Stage B augmentation search load:
+  - `speed_perturb_prob`: `0.0 -> 0.3` (was `0.4 -> 0.9`)
+  - `mixup_prob`: `0.2 -> 0.5` (was `0.2 -> 0.7`)
+- Added `--fast_debug` flag:
+  - forces lightweight augmentation for smoke checks (no speed perturb, lighter SpecAugment).
+- Added explicit progress logging before training loop:
+  - trial setup summary
+  - dataloader-ready message with setup time and batch counts
+  - per-epoch `epoch_sec` timing
+
+Expected result:
+
+- No more "silent freeze" ambiguity.
+- Faster first-epoch turnaround during Optuna smoke tests.

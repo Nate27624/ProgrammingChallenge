@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import random
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -637,8 +638,8 @@ def sample_stage_b_config(
     min_lr_ratio = trial.suggest_float("min_lr_ratio", 0.05, 0.30)
     max_grad_norm = trial.suggest_float("max_grad_norm", 0.5, 2.0)
     mixup_alpha = trial.suggest_float("mixup_alpha", 0.1, 0.5)
-    mixup_prob = trial.suggest_float("mixup_prob", 0.2, 0.7)
-    speed_perturb_prob = trial.suggest_float("speed_perturb_prob", 0.4, 0.9)
+    mixup_prob = trial.suggest_float("mixup_prob", 0.2, 0.5)
+    speed_perturb_prob = trial.suggest_float("speed_perturb_prob", 0.0, 0.3)
     speed_perturb_min = trial.suggest_categorical("speed_perturb_min", [0.9])
     speed_perturb_max = trial.suggest_categorical("speed_perturb_max", [1.1])
 
@@ -691,8 +692,25 @@ def build_objective(
         else:
             raise ValueError(f"Unsupported mode: {args.mode}")
 
+        if args.fast_debug:
+            # Force lightweight augmentation to verify trial progress quickly.
+            config["mixup_alpha"] = 0.1
+            config["mixup_prob"] = 0.2
+            config["speed_perturb_prob"] = 0.0
+            config["num_time_masks"] = 1
+            config["time_mask_param"] = min(16, int(config["time_mask_param"]))
+            config["num_freq_masks"] = 1
+            config["freq_mask_param"] = min(6, int(config["freq_mask_param"]))
+
         repeat_offset = int(config.get("repeat_id", 0)) * 1000
         set_global_seed(args.seed + trial.number + repeat_offset)
+        print(
+            f"[trial {trial.number:03d}] setup "
+            f"arch={config.get('arch_triplet', 'stage_a')} "
+            f"bs={config['batch_size']} speed_p={float(config['speed_perturb_prob']):.2f} "
+            f"mixup_p={float(config['mixup_prob']):.2f}"
+        )
+        setup_t0 = time.perf_counter()
 
         train_loader, val_loader = make_dataloaders_for_trial(
             bundle=bundle,
@@ -706,6 +724,12 @@ def build_objective(
             speed_perturb_prob=float(config["speed_perturb_prob"]),
             speed_perturb_min=float(config["speed_perturb_min"]),
             speed_perturb_max=float(config["speed_perturb_max"]),
+        )
+        setup_t1 = time.perf_counter()
+        print(
+            f"[trial {trial.number:03d}] dataloaders ready "
+            f"(train_batches={len(train_loader)}, val_batches={len(val_loader)}, "
+            f"setup_sec={setup_t1 - setup_t0:.1f})"
         )
 
         model = BidirectionalMambaSER(
@@ -769,6 +793,7 @@ def build_objective(
 
         try:
             for epoch in range(args.max_epochs):
+                epoch_t0 = time.perf_counter()
                 train_loss, train_acc = train_one_epoch(
                     model,
                     train_loader,
@@ -808,7 +833,8 @@ def build_objective(
                     f"[trial {trial.number:03d}] "
                     f"epoch {epoch+1:02d}/{args.max_epochs} "
                     f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
-                    f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f}"
+                    f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
+                    f"epoch_sec={time.perf_counter() - epoch_t0:.1f}"
                 )
         except RuntimeError as exc:
             if "out of memory" in str(exc).lower():
@@ -895,6 +921,11 @@ def main():
         type=int,
         default=2,
         help="Number of top architectures to import from --stage_b_from_study.",
+    )
+    parser.add_argument(
+        "--fast_debug",
+        action="store_true",
+        help="Use lightweight augmentation settings to quickly validate trial progress/logging.",
     )
     args = parser.parse_args()
 
