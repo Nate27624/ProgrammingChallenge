@@ -78,7 +78,7 @@ class SpeechEmotionDataset(Dataset):
                  include_deltas=False, apply_specaugment=False,
                  num_time_masks=2, time_mask_param=24,
                  num_freq_masks=2, freq_mask_param=8,
-                 apply_db=False):
+                 apply_db=False, normalize_waveform_peak=True):
         self.audio_dir  = Path(audio_dir)
         self.transform  = transform
         self.max_frames = max_frames
@@ -89,6 +89,7 @@ class SpeechEmotionDataset(Dataset):
         self.num_time_masks = num_time_masks
         self.num_freq_masks = num_freq_masks
         self.apply_db = apply_db
+        self.normalize_waveform_peak = normalize_waveform_peak
         self.to_db = T.AmplitudeToDB()
         self.time_mask = T.TimeMasking(time_mask_param=time_mask_param)
         self.freq_mask = T.FrequencyMasking(freq_mask_param=freq_mask_param)
@@ -128,6 +129,10 @@ class SpeechEmotionDataset(Dataset):
         # Stereo to mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
+        if self.normalize_waveform_peak:
+            peak = waveform.abs().max()
+            if peak > 0:
+                waveform = waveform / peak
 
         # Features: (1, n_features, time_frames)
         spec = self.transform(waveform)
@@ -301,7 +306,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
 
     train_loader = DataLoader(
         train_final, batch_size=batch_size,
-        shuffle=True, num_workers=num_workers, pin_memory=True,
+        shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True,
     )
     val_loader = DataLoader(
         val_final, batch_size=batch_size,

@@ -55,6 +55,7 @@ CONFIG = {
     "batch_size":    64,
     "learning_rate": 3e-4,
     "weight_decay":  1e-4,
+    "max_grad_norm": 1.0,
     "loss_type": "ce",
     "focal_gamma": 2.0,
     "class_weighting": False,
@@ -161,7 +162,7 @@ def build_lr_lambda(
 
 
 # ── One training epoch ─────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(model, loader, criterion, optimizer, device, max_grad_norm=None):
     """Run one training epoch. Logs step-level loss to wandb."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -174,6 +175,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
         logits = model(specs)
         loss   = criterion(logits, labels)
         loss.backward()
+        if max_grad_norm is not None and max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
 
         total_loss += loss.item() * specs.size(0)
@@ -282,6 +285,7 @@ def main(args):
     config["batch_size"] = args.batch_size
     config["learning_rate"] = args.learning_rate
     config["weight_decay"] = args.weight_decay
+    config["max_grad_norm"] = args.max_grad_norm
     config["loss_type"] = args.loss_type
     config["focal_gamma"] = args.focal_gamma
     config["class_weighting"] = args.class_weighting
@@ -340,6 +344,7 @@ def main(args):
                 "fusion_type": config["fusion_type"],
                 "pooling_type": config["pooling_type"],
                 "weight_decay": config["weight_decay"],
+                "max_grad_norm": config["max_grad_norm"],
                 "label_smoothing": config["label_smoothing"],
                 "loss_type": config["loss_type"],
                 "focal_gamma": config["focal_gamma"],
@@ -403,7 +408,7 @@ def main(args):
     else:
         raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config["learning_rate"],
         weight_decay=config["weight_decay"],
@@ -480,7 +485,7 @@ def main(args):
     for epoch in range(start_epoch, config["num_epochs"]):
 
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, criterion, optimizer, device, config["max_grad_norm"]
         )
         val_loss, val_acc, val_f1 = validate(
             model, val_loader, criterion, device
@@ -725,7 +730,13 @@ if __name__ == "__main__":
         "--weight_decay",
         type=float,
         default=1e-4,
-        help="Adam weight decay (default: 1e-4).",
+        help="AdamW decoupled weight decay (default: 1e-4).",
+    )
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=1.0,
+        help="Global gradient clipping max-norm (default: 1.0).",
     )
     parser.add_argument(
         "--loss_type",

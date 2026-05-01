@@ -227,6 +227,7 @@ def make_dataloaders_for_trial(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        drop_last=True,
     )
     val_loader = DataLoader(
         val_subset,
@@ -295,6 +296,7 @@ def train_one_epoch(
     device: torch.device,
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
+    max_grad_norm: float | None = None,
 ) -> Tuple[float, float]:
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -306,6 +308,9 @@ def train_one_epoch(
             logits = model(specs)
             loss = criterion(logits, labels)
         scaler.scale(loss).backward()
+        if max_grad_norm is not None and max_grad_norm > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
 
@@ -491,6 +496,7 @@ def sample_stage_a_config(
     scheduler_type = trial.suggest_categorical("scheduler_type", ["plateau"])
     warmup_epochs = trial.suggest_categorical("warmup_epochs", [5])
     min_lr_ratio = trial.suggest_categorical("min_lr_ratio", [0.1])
+    max_grad_norm = trial.suggest_categorical("max_grad_norm", [1.0])
     batch_size = trial.suggest_categorical("batch_size", [args.stage_a_batch_size])
     num_time_masks = trial.suggest_categorical("num_time_masks", [2])
     time_mask_param = trial.suggest_categorical("time_mask_param", [24])
@@ -517,6 +523,7 @@ def sample_stage_a_config(
         "scheduler_type": scheduler_type,
         "warmup_epochs": warmup_epochs,
         "min_lr_ratio": min_lr_ratio,
+        "max_grad_norm": max_grad_norm,
         "batch_size": batch_size,
         "num_time_masks": num_time_masks,
         "time_mask_param": time_mask_param,
@@ -597,6 +604,7 @@ def sample_stage_b_config(
     )
     warmup_epochs = trial.suggest_int("warmup_epochs", 2, 8)
     min_lr_ratio = trial.suggest_float("min_lr_ratio", 0.05, 0.30)
+    max_grad_norm = trial.suggest_float("max_grad_norm", 0.5, 2.0)
 
     return {
         "mamba_d_model": d_model,
@@ -618,6 +626,7 @@ def sample_stage_b_config(
         "scheduler_type": scheduler_type,
         "warmup_epochs": warmup_epochs,
         "min_lr_ratio": min_lr_ratio,
+        "max_grad_norm": max_grad_norm,
         "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True),
         "batch_size": trial.suggest_categorical("batch_size", [32, 64]),
         "num_time_masks": trial.suggest_int("num_time_masks", tmask_min, tmask_max),
@@ -688,7 +697,7 @@ def build_objective(
         else:
             raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
 
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=float(config["learning_rate"]),
             weight_decay=float(config["weight_decay"]),
@@ -717,7 +726,14 @@ def build_objective(
         try:
             for epoch in range(args.max_epochs):
                 train_loss, train_acc = train_one_epoch(
-                    model, train_loader, criterion, optimizer, device, scaler, amp_enabled
+                    model,
+                    train_loader,
+                    criterion,
+                    optimizer,
+                    device,
+                    scaler,
+                    amp_enabled,
+                    max_grad_norm=float(config["max_grad_norm"]),
                 )
                 val_loss, val_acc, val_f1 = validate(
                     model, val_loader, criterion, device, amp_enabled
@@ -959,6 +975,7 @@ def main():
         f"--dropout {study.best_trial.params['dropout']}",
         f"--learning_rate {study.best_trial.params['learning_rate']}",
         f"--weight_decay {study.best_trial.params['weight_decay']}",
+        f"--max_grad_norm {study.best_trial.params['max_grad_norm']}",
         f"--loss_type {study.best_trial.params['loss_type']}",
         f"--focal_gamma {study.best_trial.params['focal_gamma']}",
         "--class_weighting" if study.best_trial.params["class_weighting"] else "--no_class_weighting",

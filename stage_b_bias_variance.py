@@ -79,6 +79,7 @@ def trial_to_config(params: Dict[str, Any]) -> Dict[str, Any]:
         "scheduler_type": str(params.get("scheduler_type", "plateau")),
         "warmup_epochs": int(params.get("warmup_epochs", 5)),
         "min_lr_ratio": float(params.get("min_lr_ratio", 0.1)),
+        "max_grad_norm": float(params.get("max_grad_norm", 1.0)),
         "learning_rate": float(params["learning_rate"]),
         "batch_size": int(params["batch_size"]),
         "num_time_masks": int(params["num_time_masks"]),
@@ -140,7 +141,7 @@ def run_single_seed(
         )
     else:
         raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config["learning_rate"]),
         weight_decay=float(config["weight_decay"]),
@@ -168,7 +169,14 @@ def run_single_seed(
     try:
         for _ in range(args.max_epochs):
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, device, scaler, amp_enabled
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                device,
+                scaler,
+                amp_enabled,
+                max_grad_norm=float(config["max_grad_norm"]),
             )
             val_loss, val_acc, val_f1 = validate(
                 model, val_loader, criterion, device, amp_enabled
@@ -299,6 +307,7 @@ def main() -> None:
                     "scheduler_type": cfg["scheduler_type"],
                     "warmup_epochs": cfg["warmup_epochs"],
                     "min_lr_ratio": cfg["min_lr_ratio"],
+                    "max_grad_norm": cfg["max_grad_norm"],
                     "learning_rate": cfg["learning_rate"],
                     "batch_size": cfg["batch_size"],
                 }
@@ -341,6 +350,7 @@ def main() -> None:
                 "scheduler_type": cfg["scheduler_type"],
                 "warmup_epochs": cfg["warmup_epochs"],
                 "min_lr_ratio": cfg["min_lr_ratio"],
+                "max_grad_norm": cfg["max_grad_norm"],
                 "learning_rate": cfg["learning_rate"],
                 "batch_size": cfg["batch_size"],
                 "num_time_masks": cfg["num_time_masks"],
@@ -415,6 +425,7 @@ def main() -> None:
             f"--scheduler_type {best['scheduler_type']}",
             f"--warmup_epochs {best['warmup_epochs']}",
             f"--min_lr_ratio {best['min_lr_ratio']}",
+            f"--max_grad_norm {best['max_grad_norm']}",
             f"--batch_size {best['batch_size']}",
             f"--num_time_masks {best['num_time_masks']}",
             f"--time_mask_param {best['time_mask_param']}",
