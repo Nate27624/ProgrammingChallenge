@@ -190,6 +190,9 @@ def make_dataloaders_for_trial(
     time_mask_param: int,
     num_freq_masks: int,
     freq_mask_param: int,
+    speed_perturb_prob: float,
+    speed_perturb_min: float,
+    speed_perturb_max: float,
 ) -> Tuple[DataLoader, DataLoader]:
     pin_memory = torch.cuda.is_available()
     train_dataset = SpeechEmotionDataset(
@@ -206,6 +209,9 @@ def make_dataloaders_for_trial(
         num_freq_masks=num_freq_masks,
         freq_mask_param=freq_mask_param,
         apply_db=bundle.apply_db,
+        speed_perturb_prob=speed_perturb_prob,
+        speed_perturb_min=speed_perturb_min,
+        speed_perturb_max=speed_perturb_max,
     )
     val_dataset = SpeechEmotionDataset(
         audio_dir=bundle.train_dir / "audio",
@@ -297,6 +303,8 @@ def train_one_epoch(
     scaler: torch.amp.GradScaler,
     amp_enabled: bool,
     max_grad_norm: float | None = None,
+    mixup_alpha: float = 0.0,
+    mixup_prob: float = 0.0,
 ) -> Tuple[float, float]:
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -304,9 +312,22 @@ def train_one_epoch(
     for specs, labels in loader:
         specs, labels = specs.to(device), labels.to(device)
         optimizer.zero_grad()
+        use_mixup = (
+            mixup_alpha > 0.0
+            and mixup_prob > 0.0
+            and torch.rand(1).item() < mixup_prob
+            and specs.size(0) > 1
+        )
         with torch.autocast(device_type=device.type, enabled=amp_enabled):
-            logits = model(specs)
-            loss = criterion(logits, labels)
+            if use_mixup:
+                lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                perm = torch.randperm(specs.size(0), device=device)
+                mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
+                logits = model(mixed_specs)
+                loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+            else:
+                logits = model(specs)
+                loss = criterion(logits, labels)
         scaler.scale(loss).backward()
         if max_grad_norm is not None and max_grad_norm > 0:
             scaler.unscale_(optimizer)
@@ -497,6 +518,11 @@ def sample_stage_a_config(
     warmup_epochs = trial.suggest_categorical("warmup_epochs", [5])
     min_lr_ratio = trial.suggest_categorical("min_lr_ratio", [0.1])
     max_grad_norm = trial.suggest_categorical("max_grad_norm", [1.0])
+    mixup_alpha = trial.suggest_categorical("mixup_alpha", [0.2])
+    mixup_prob = trial.suggest_categorical("mixup_prob", [0.4])
+    speed_perturb_prob = trial.suggest_categorical("speed_perturb_prob", [0.6])
+    speed_perturb_min = trial.suggest_categorical("speed_perturb_min", [0.9])
+    speed_perturb_max = trial.suggest_categorical("speed_perturb_max", [1.1])
     batch_size = trial.suggest_categorical("batch_size", [args.stage_a_batch_size])
     num_time_masks = trial.suggest_categorical("num_time_masks", [2])
     time_mask_param = trial.suggest_categorical("time_mask_param", [24])
@@ -524,6 +550,11 @@ def sample_stage_a_config(
         "warmup_epochs": warmup_epochs,
         "min_lr_ratio": min_lr_ratio,
         "max_grad_norm": max_grad_norm,
+        "mixup_alpha": mixup_alpha,
+        "mixup_prob": mixup_prob,
+        "speed_perturb_prob": speed_perturb_prob,
+        "speed_perturb_min": speed_perturb_min,
+        "speed_perturb_max": speed_perturb_max,
         "batch_size": batch_size,
         "num_time_masks": num_time_masks,
         "time_mask_param": time_mask_param,
@@ -605,6 +636,11 @@ def sample_stage_b_config(
     warmup_epochs = trial.suggest_int("warmup_epochs", 2, 8)
     min_lr_ratio = trial.suggest_float("min_lr_ratio", 0.05, 0.30)
     max_grad_norm = trial.suggest_float("max_grad_norm", 0.5, 2.0)
+    mixup_alpha = trial.suggest_float("mixup_alpha", 0.1, 0.5)
+    mixup_prob = trial.suggest_float("mixup_prob", 0.2, 0.7)
+    speed_perturb_prob = trial.suggest_float("speed_perturb_prob", 0.4, 0.9)
+    speed_perturb_min = trial.suggest_categorical("speed_perturb_min", [0.9])
+    speed_perturb_max = trial.suggest_categorical("speed_perturb_max", [1.1])
 
     return {
         "mamba_d_model": d_model,
@@ -627,6 +663,11 @@ def sample_stage_b_config(
         "warmup_epochs": warmup_epochs,
         "min_lr_ratio": min_lr_ratio,
         "max_grad_norm": max_grad_norm,
+        "mixup_alpha": mixup_alpha,
+        "mixup_prob": mixup_prob,
+        "speed_perturb_prob": speed_perturb_prob,
+        "speed_perturb_min": speed_perturb_min,
+        "speed_perturb_max": speed_perturb_max,
         "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True),
         "batch_size": trial.suggest_categorical("batch_size", [32, 64]),
         "num_time_masks": trial.suggest_int("num_time_masks", tmask_min, tmask_max),
@@ -662,6 +703,9 @@ def build_objective(
             time_mask_param=int(config["time_mask_param"]),
             num_freq_masks=int(config["num_freq_masks"]),
             freq_mask_param=int(config["freq_mask_param"]),
+            speed_perturb_prob=float(config["speed_perturb_prob"]),
+            speed_perturb_min=float(config["speed_perturb_min"]),
+            speed_perturb_max=float(config["speed_perturb_max"]),
         )
 
         model = BidirectionalMambaSER(
@@ -734,6 +778,8 @@ def build_objective(
                     scaler,
                     amp_enabled,
                     max_grad_norm=float(config["max_grad_norm"]),
+                    mixup_alpha=float(config["mixup_alpha"]),
+                    mixup_prob=float(config["mixup_prob"]),
                 )
                 val_loss, val_acc, val_f1 = validate(
                     model, val_loader, criterion, device, amp_enabled
@@ -976,6 +1022,8 @@ def main():
         f"--learning_rate {study.best_trial.params['learning_rate']}",
         f"--weight_decay {study.best_trial.params['weight_decay']}",
         f"--max_grad_norm {study.best_trial.params['max_grad_norm']}",
+        f"--mixup_alpha {study.best_trial.params['mixup_alpha']}",
+        f"--mixup_prob {study.best_trial.params['mixup_prob']}",
         f"--loss_type {study.best_trial.params['loss_type']}",
         f"--focal_gamma {study.best_trial.params['focal_gamma']}",
         "--class_weighting" if study.best_trial.params["class_weighting"] else "--no_class_weighting",
@@ -988,6 +1036,10 @@ def main():
         f"--time_mask_param {study.best_trial.params['time_mask_param']}",
         f"--num_freq_masks {study.best_trial.params['num_freq_masks']}",
         f"--freq_mask_param {study.best_trial.params['freq_mask_param']}",
+        f"--speed_perturb_prob {study.best_trial.params['speed_perturb_prob']}",
+        f"--speed_perturb_min {study.best_trial.params['speed_perturb_min']}",
+        f"--speed_perturb_max {study.best_trial.params['speed_perturb_max']}",
+        f"--seed {args.seed}",
     ]
     with open(out_dir / "retrain_command.txt", "w", encoding="utf-8") as f:
         f.write(" \\\n  ".join(retrain_cmd) + "\n")

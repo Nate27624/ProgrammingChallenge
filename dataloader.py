@@ -78,7 +78,8 @@ class SpeechEmotionDataset(Dataset):
                  include_deltas=False, apply_specaugment=False,
                  num_time_masks=2, time_mask_param=24,
                  num_freq_masks=2, freq_mask_param=8,
-                 apply_db=False, normalize_waveform_peak=True):
+                 apply_db=False, normalize_waveform_peak=True,
+                 speed_perturb_prob=0.0, speed_perturb_min=0.9, speed_perturb_max=1.1):
         self.audio_dir  = Path(audio_dir)
         self.transform  = transform
         self.max_frames = max_frames
@@ -90,6 +91,9 @@ class SpeechEmotionDataset(Dataset):
         self.num_freq_masks = num_freq_masks
         self.apply_db = apply_db
         self.normalize_waveform_peak = normalize_waveform_peak
+        self.speed_perturb_prob = float(speed_perturb_prob)
+        self.speed_perturb_min = float(speed_perturb_min)
+        self.speed_perturb_max = float(speed_perturb_max)
         self.to_db = T.AmplitudeToDB()
         self.time_mask = T.TimeMasking(time_mask_param=time_mask_param)
         self.freq_mask = T.FrequencyMasking(freq_mask_param=freq_mask_param)
@@ -129,6 +133,21 @@ class SpeechEmotionDataset(Dataset):
         # Stereo to mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
+
+        # Waveform-domain speed perturbation (train augmentation).
+        if (
+            self.speed_perturb_prob > 0.0
+            and torch.rand(1).item() < self.speed_perturb_prob
+            and self.speed_perturb_min > 0.0
+            and self.speed_perturb_max >= self.speed_perturb_min
+        ):
+            rate = torch.empty(1).uniform_(
+                self.speed_perturb_min, self.speed_perturb_max
+            ).item()
+            perturbed_sr = max(1, int(round(SAMPLE_RATE * rate)))
+            waveform = AF.resample(waveform, SAMPLE_RATE, perturbed_sr)
+            waveform = AF.resample(waveform, perturbed_sr, SAMPLE_RATE)
+
         if self.normalize_waveform_peak:
             peak = waveform.abs().max()
             if peak > 0:
@@ -187,7 +206,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
                     include_deltas=False, apply_specaugment=False,
                     num_time_masks=2, time_mask_param=24,
                     num_freq_masks=2, freq_mask_param=8,
-                    feature_type="mel", n_features=None):
+                    feature_type="mel", n_features=None,
+                    speed_perturb_prob=0.0, speed_perturb_min=0.9, speed_perturb_max=1.1):
     """Build DataLoaders for train, validation, and test splits.
 
     The training set is split into train and validation subsets using
@@ -279,6 +299,9 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         num_freq_masks = num_freq_masks,
         freq_mask_param = freq_mask_param,
         apply_db = apply_db,
+        speed_perturb_prob = speed_perturb_prob,
+        speed_perturb_min = speed_perturb_min,
+        speed_perturb_max = speed_perturb_max,
     )
     val_dataset = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
@@ -331,6 +354,11 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
             "SpecAugment (train only): "
             f"time_masks={num_time_masks}, time_param={time_mask_param}, "
             f"freq_masks={num_freq_masks}, freq_param={freq_mask_param}"
+        )
+    if speed_perturb_prob > 0.0:
+        print(
+            "Speed perturbation (train only): "
+            f"prob={speed_perturb_prob:.2f}, range=[{speed_perturb_min:.2f}, {speed_perturb_max:.2f}]"
         )
 
     return train_loader, val_loader, test_loader, mean, std

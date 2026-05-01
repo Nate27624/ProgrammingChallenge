@@ -20,12 +20,16 @@ Outputs saved to <results_dir>/<team_name>/:
 """
 
 import argparse
+import json
 import math
+import random
+import sys
 import uuid
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from sklearn.metrics import f1_score
@@ -56,6 +60,8 @@ CONFIG = {
     "learning_rate": 3e-4,
     "weight_decay":  1e-4,
     "max_grad_norm": 1.0,
+    "mixup_alpha": 0.0,
+    "mixup_prob": 0.0,
     "loss_type": "ce",
     "focal_gamma": 2.0,
     "class_weighting": False,
@@ -73,6 +79,10 @@ CONFIG = {
     "time_mask_param": 24,
     "num_freq_masks": 2,
     "freq_mask_param": 8,
+    "speed_perturb_prob": 0.0,
+    "speed_perturb_min": 0.9,
+    "speed_perturb_max": 1.1,
+    "seed": 42,
 }
 
 
@@ -161,8 +171,25 @@ def build_lr_lambda(
     raise ValueError(f"Unsupported scheduler_type: {schedule_type}")
 
 
+def set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 # ── One training epoch ─────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, criterion, optimizer, device, max_grad_norm=None):
+def train_one_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    device,
+    max_grad_norm=None,
+    mixup_alpha: float = 0.0,
+    mixup_prob: float = 0.0,
+):
     """Run one training epoch. Logs step-level loss to wandb."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -172,15 +199,30 @@ def train_one_epoch(model, loader, criterion, optimizer, device, max_grad_norm=N
         specs, labels = specs.to(device), labels.to(device)
 
         optimizer.zero_grad()
-        logits = model(specs)
-        loss   = criterion(logits, labels)
+        use_mixup = (
+            mixup_alpha > 0.0
+            and mixup_prob > 0.0
+            and torch.rand(1).item() < mixup_prob
+            and specs.size(0) > 1
+        )
+        if use_mixup:
+            lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+            perm = torch.randperm(specs.size(0), device=device)
+            mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
+            logits = model(mixed_specs)
+            loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+            mixed_labels = labels
+        else:
+            logits = model(specs)
+            loss = criterion(logits, labels)
+            mixed_labels = labels
         loss.backward()
         if max_grad_norm is not None and max_grad_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
 
         total_loss += loss.item() * specs.size(0)
-        correct    += (logits.argmax(dim=1) == labels).sum().item()
+        correct    += (logits.argmax(dim=1) == mixed_labels).sum().item()
         total      += specs.size(0)
 
         # Step-level logging
@@ -286,6 +328,8 @@ def main(args):
     config["learning_rate"] = args.learning_rate
     config["weight_decay"] = args.weight_decay
     config["max_grad_norm"] = args.max_grad_norm
+    config["mixup_alpha"] = args.mixup_alpha
+    config["mixup_prob"] = args.mixup_prob
     config["loss_type"] = args.loss_type
     config["focal_gamma"] = args.focal_gamma
     config["class_weighting"] = args.class_weighting
@@ -297,6 +341,10 @@ def main(args):
     config["patience"] = args.patience
     config["patience_lr"] = args.patience_lr
     config["val_split"] = args.val_split
+    config["speed_perturb_prob"] = args.speed_perturb_prob
+    config["speed_perturb_min"] = args.speed_perturb_min
+    config["speed_perturb_max"] = args.speed_perturb_max
+    config["seed"] = args.seed
 
     output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -304,6 +352,8 @@ def main(args):
     checkpoint_path = output_dir / "checkpoint.pt"
     best_model_path = output_dir / "best_model.pt"
     norm_stats_path = output_dir / "norm_stats.pt"
+
+    set_global_seed(config["seed"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -320,6 +370,9 @@ def main(args):
         time_mask_param = config["time_mask_param"],
         num_freq_masks = config["num_freq_masks"],
         freq_mask_param = config["freq_mask_param"],
+        speed_perturb_prob = config["speed_perturb_prob"],
+        speed_perturb_min = config["speed_perturb_min"],
+        speed_perturb_max = config["speed_perturb_max"],
         feature_type = config["feature_type"],
         n_features = config["n_features"],
     )
@@ -345,6 +398,8 @@ def main(args):
                 "pooling_type": config["pooling_type"],
                 "weight_decay": config["weight_decay"],
                 "max_grad_norm": config["max_grad_norm"],
+                "mixup_alpha": config["mixup_alpha"],
+                "mixup_prob": config["mixup_prob"],
                 "label_smoothing": config["label_smoothing"],
                 "loss_type": config["loss_type"],
                 "focal_gamma": config["focal_gamma"],
@@ -352,10 +407,18 @@ def main(args):
                 "scheduler_type": config["scheduler_type"],
                 "warmup_epochs": config["warmup_epochs"],
                 "min_lr_ratio": config["min_lr_ratio"],
+                "speed_perturb_prob": config["speed_perturb_prob"],
+                "speed_perturb_min": config["speed_perturb_min"],
+                "speed_perturb_max": config["speed_perturb_max"],
+                "seed": config["seed"],
             },
         },
         norm_stats_path
     )
+    with open(output_dir / "config.json", "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    with open(output_dir / "train_command.txt", "w", encoding="utf-8") as f:
+        f.write(" ".join(sys.argv) + "\n")
 
     # ── Model, optimiser, scheduler ───────────────────────────────────────────
     in_channels = 3 if config["include_deltas"] else 1
@@ -485,7 +548,14 @@ def main(args):
     for epoch in range(start_epoch, config["num_epochs"]):
 
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, config["max_grad_norm"]
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            config["max_grad_norm"],
+            mixup_alpha=config["mixup_alpha"],
+            mixup_prob=config["mixup_prob"],
         )
         val_loss, val_acc, val_f1 = validate(
             model, val_loader, criterion, device
@@ -552,6 +622,7 @@ def main(args):
             "train_accs":           train_accs,
             "val_accs":             val_accs,
             "wandb_id":             wandb_id,
+            "config":               config,
         }, checkpoint_path)
 
     # ── Post-training ──────────────────────────────────────────────────────────
@@ -739,6 +810,18 @@ if __name__ == "__main__":
         help="Global gradient clipping max-norm (default: 1.0).",
     )
     parser.add_argument(
+        "--mixup_alpha",
+        type=float,
+        default=0.0,
+        help="Mixup Beta(alpha, alpha) parameter; 0 disables mixup (default: 0.0).",
+    )
+    parser.add_argument(
+        "--mixup_prob",
+        type=float,
+        default=0.0,
+        help="Per-batch probability of applying mixup (default: 0.0).",
+    )
+    parser.add_argument(
         "--loss_type",
         type=str,
         choices=["ce", "focal"],
@@ -811,6 +894,30 @@ if __name__ == "__main__":
         type=float,
         default=0.15,
         help="Validation split fraction (default: 0.15).",
+    )
+    parser.add_argument(
+        "--speed_perturb_prob",
+        type=float,
+        default=0.0,
+        help="Waveform speed perturbation probability on train split (default: 0.0).",
+    )
+    parser.add_argument(
+        "--speed_perturb_min",
+        type=float,
+        default=0.9,
+        help="Minimum speed perturbation factor (default: 0.9).",
+    )
+    parser.add_argument(
+        "--speed_perturb_max",
+        type=float,
+        default=1.1,
+        help="Maximum speed perturbation factor (default: 1.1).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Global random seed for reproducibility (default: 42).",
     )
     parser.add_argument(
         "--num_time_masks",

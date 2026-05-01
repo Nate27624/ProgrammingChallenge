@@ -258,42 +258,52 @@ Top trial characteristics so far:
   - `class_weighting=False`
   - batch mostly `32`
   - learning rate near high end (`~8.5e-4` to `1.0e-3`)
-  - moderate dropout (`~0.29` to `0.34`)
-  - label smoothing around `0.04` to `0.06`
 
-Interpretation:
+## 13. Latest Commit Review and Adjusted Plan (2026-05-01)
 
-- This run is materially better than prior robust `~0.654` range.
-- New warmup/focal/weighting knobs did not dominate early; CE+plateau currently leads.
-- Since best is at trial 11 and no later trial has surpassed it, immediate next step is robust reranking (mean/std) instead of extending broad random search.
+Reviewed commit with 3 retrains (`m7`):
 
-Immediate next step:
+- `results/m6_a_trial11`: best val F1 `0.6582`
+- `results/m6_b_trial13`: best val F1 `0.6429`
+- `results/m6_c_trial4`: best val F1 `0.6144`
+- prior best checkpoint still higher: `results/mamba_stage_b_recipe_v2_bv_best` at `0.6675`
 
-1. Run `stage_b_bias_variance.py` on `mamba_stage_b_recipe` top trials.
-2. Retrain top 2 robust configs.
-3. Ensemble top 2 if close.
+Diagnosis:
 
-## 13. Opus Recommendation Integration (2026-05-01)
+- Replication gap is real (search winner did not transfer cleanly to retrain).
+- Remaining bottleneck is generalization stability, not raw model capacity.
+- Missing run metadata in output folders made exact replay harder.
 
-Reviewed recommendation set and implemented high-confidence, low-risk items directly:
+## 14. New Changes Implemented (2026-05-01)
 
-- Switched optimizers from `Adam` to `AdamW` (decoupled weight decay) in:
-  - `train.py`
-  - `optuna_search.py`
-  - `stage_b_bias_variance.py`
-- Added gradient clipping (`max_grad_norm`, default `1.0`) in:
-  - `train.py`
-  - `optuna_search.py` (with AMP-safe unscale before clipping)
-  - propagated through rerank/retrain command generation
-- Added `drop_last=True` for **training** DataLoaders in:
-  - `dataloader.py`
-  - `optuna_search.py` trial loaders
-- Added peak waveform normalization in `SpeechEmotionDataset` before feature extraction.
+`dataloader.py`:
 
-Status of other suggested items:
+- Added waveform speed perturbation on train split:
+  - `speed_perturb_prob`
+  - `speed_perturb_min`
+  - `speed_perturb_max`
 
-- Not yet implemented:
-  - waveform speed perturbation
-  - spectrogram mixup
-  - stochastic weight averaging (SWA)
-- Reason: these are higher-touch changes that are best introduced one at a time after measuring impact from the above stability/regularization fixes.
+`train.py`:
+
+- Added global seed control (`--seed`).
+- Added mixup knobs:
+  - `--mixup_alpha`
+  - `--mixup_prob`
+- Wired speed perturbation knobs into training dataloaders.
+- Added reproducibility artifacts per run:
+  - `config.json`
+  - `train_command.txt`
+
+`optuna_search.py`:
+
+- Stage B now tunes mixup + speed perturbation:
+  - `mixup_alpha`, `mixup_prob`
+  - `speed_perturb_prob`, `speed_perturb_min`, `speed_perturb_max`
+- Trial objective now trains with those knobs enabled.
+- Generated `retrain_command.txt` now includes new knobs, so search and retrain align.
+
+Rationale:
+
+- Keep proven architecture family (`basic_cnn:gated:meanmax` + BiMamba).
+- Increase generalization pressure with stronger augmentation/regularization coupling.
+- Reduce “lucky trial” risk by making reruns more reproducible.
