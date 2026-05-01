@@ -238,3 +238,37 @@ For each major run, append:
 ---
 
 Last updated: 2026-04-30
+
+## 12. Latest Run Snapshot (m5-1 / 2026-05-01)
+
+Study inspected: `mamba_stage_b_recipe`
+
+Observed state from study DB:
+
+- `28` total trials
+- `13 COMPLETE`, `14 PRUNED`, `1 FAIL`
+- best trial: `#11`, val weighted F1 = `0.666876`
+
+Top trial characteristics so far:
+
+- architecture fixed to: `basic_cnn:gated:meanmax`
+- best configs strongly favored:
+  - `loss_type=ce`
+  - `scheduler_type=plateau`
+  - `class_weighting=False`
+  - batch mostly `32`
+  - learning rate near high end (`~8.5e-4` to `1.0e-3`)
+  - moderate dropout (`~0.29` to `0.34`)
+  - label smoothing around `0.04` to `0.06`
+
+Interpretation:
+
+- This run is materially better than prior robust `~0.654` range.
+- New warmup/focal/weighting knobs did not dominate early; CE+plateau currently leads.
+- Since best is at trial 11 and no later trial has surpassed it, immediate next step is robust reranking (mean/std) instead of extending broad random search.
+
+Immediate next step:
+
+1. Run `stage_b_bias_variance.py` on `mamba_stage_b_recipe` top trials.
+2. Retrain top 2 robust configs.
+3. Ensemble top 2 if close.
