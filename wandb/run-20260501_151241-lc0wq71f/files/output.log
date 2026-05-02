@@ -1,0 +1,10 @@
+
+Training for up to 1 epochs (early stopping patience = 10)...
+                                                                                                   
+
+Epoch   1/1  train_loss: 1.7303  train_acc: 0.3174  val_loss: 1.4729  val_acc: 0.4305  val_f1: 0.3931  lr: 3.00e-04
+  --> New best model saved (val_f1: 0.3931, val_loss: 1.4729)
+Loss curves saved to: results\sanity_gpu\loss_curve.png
+
+Best model saved to : results\sanity_gpu\best_model.pt
+Norm stats saved to : results\sanity_gpu\norm_stats.pt

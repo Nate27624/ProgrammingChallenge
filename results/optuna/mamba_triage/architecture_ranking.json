@@ -1,0 +1,10 @@
+[
+  {
+    "frontend_type": "basic_cnn",
+    "fusion_type": "gated",
+    "pooling_type": "meanmax",
+    "num_trials": 8,
+    "mean_val_f1": 0.39968375661973615,
+    "max_val_f1": 0.4213105761223376
+  }
+]

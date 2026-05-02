@@ -1,0 +1,41 @@
+
+Training for up to 80 epochs (early stopping patience = 10)...
+Traceback (most recent call last):                                                                 
+  File "D:\School\CSE 5526\ProgrammingChallenge\TestSetup\ProgrammingChallenge\train.py", line 839, in <module>
+    main(parser.parse_args())
+    ~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "D:\School\CSE 5526\ProgrammingChallenge\TestSetup\ProgrammingChallenge\train.py", line 487, in main
+    train_loss, train_acc = train_one_epoch(
+                            ~~~~~~~~~~~~~~~^
+        model, train_loader, criterion, optimizer, device, config["max_grad_norm"]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\School\CSE 5526\ProgrammingChallenge\TestSetup\ProgrammingChallenge\train.py", line 177, in train_one_epoch
+    loss.backward()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\torch\_tensor.py", line 631, in backward
+    torch.autograd.backward(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        self, gradient, retain_graph, create_graph, inputs=inputs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\torch\autograd\__init__.py", line 379, in backward
+    _engine_run_backward(
+    ~~~~~~~~~~~~~~~~~~~~^
+        tensors,
+        ^^^^^^^^
+    ...<5 lines>...
+        accumulate_grad=True,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\torch\autograd\graph.py", line 877, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        t_outputs, *args, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )  # Calls into the C++ engine to run the backward pass
+    ^
+KeyboardInterrupt

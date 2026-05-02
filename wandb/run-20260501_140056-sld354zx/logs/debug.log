@@ -1,0 +1,207 @@
+2026-05-01 14:00:56,512 INFO    MainThread:138052 [wandb_setup.py:_flush():81] Current SDK version is 0.26.1
+2026-05-01 14:00:56,512 INFO    MainThread:138052 [wandb_setup.py:_flush():81] Configure stats pid to 138052
+2026-05-01 14:00:56,512 INFO    MainThread:138052 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-05-01 14:00:56,512 INFO    MainThread:138052 [wandb_init.py:setup_run_log_directory():723] Logging user logs to D:\School\CSE 5526\ProgrammingChallenge\TestSetup\ProgrammingChallenge\wandb\run-20260501_140056-sld354zx\logs\debug.log
+2026-05-01 14:00:56,512 INFO    MainThread:138052 [wandb_init.py:setup_run_log_directory():724] Logging internal logs to D:\School\CSE 5526\ProgrammingChallenge\TestSetup\ProgrammingChallenge\wandb\run-20260501_140056-sld354zx\logs\debug-internal.log
+2026-05-01 14:00:56,512 INFO    MainThread:138052 [wandb_init.py:init():850] calling init triggers
+2026-05-01 14:00:56,512 INFO    MainThread:138052 [wandb_init.py:init():855] wandb.init called with sweep_config: {}
+config: {'model_name': 'mamba', 'feature_type': 'mfcc', 'n_features': 40, 'hidden_size': 128, 'num_layers': 2, 'dropout': 0.3003564592, 'mamba_d_model': 96, 'mamba_d_state': 64, 'mamba_d_conv': 4, 'mamba_expand': 4, 'cnn_channels': 48, 'frontend_type': 'basic_cnn', 'fusion_type': 'gated', 'pooling_type': 'meanmax', 'batch_size': 64, 'learning_rate': 0.0009674988, 'weight_decay': 6.99536e-05, 'max_grad_norm': 1.2341791404, 'loss_type': 'ce', 'focal_gamma': 2.0, 'class_weighting': False, 'label_smoothing': 0.0370790479, 'scheduler_type': 'warmup_cosine', 'warmup_epochs': 3, 'min_lr_ratio': 0.086223718, 'num_epochs': 80, 'patience': 10, 'patience_lr': 3, 'val_split': 0.15, 'include_deltas': True, 'specaugment': True, 'num_time_masks': 3, 'time_mask_param': 20, 'num_freq_masks': 3, 'freq_mask_param': 6, '_wandb': {}}
+2026-05-01 14:00:56,513 INFO    MainThread:138052 [wandb_init.py:init():898] starting backend
+2026-05-01 14:00:58,827 INFO    MainThread:138052 [wandb_init.py:init():913] sending inform_init request
+2026-05-01 14:00:59,119 INFO    MainThread:138052 [wandb_init.py:init():918] backend started and connected
+2026-05-01 14:00:59,131 INFO    MainThread:138052 [wandb_init.py:init():988] updated telemetry
+2026-05-01 14:00:59,160 INFO    MainThread:138052 [wandb_init.py:init():1011] communicating run to backend with 90.0 second timeout
+2026-05-01 14:00:59,531 INFO    MainThread:138052 [wandb_init.py:init():1051] run resumed
+2026-05-01 14:00:59,532 INFO    MainThread:138052 [wandb_init.py:init():1056] starting run threads in backend
+2026-05-01 14:00:59,607 INFO    MainThread:138052 [wandb_run.py:_console_start():2554] atexit reg
+2026-05-01 14:00:59,607 INFO    MainThread:138052 [wandb_run.py:_redirect():2403] redirect: wrap_raw
+2026-05-01 14:00:59,607 INFO    MainThread:138052 [wandb_run.py:_redirect():2472] Wrapping output streams.
+2026-05-01 14:00:59,607 INFO    MainThread:138052 [wandb_run.py:_redirect():2495] Redirects installed.
+2026-05-01 14:00:59,609 INFO    MainThread:138052 [wandb_init.py:init():1094] run started, returning control to user process
+2026-05-01 14:01:09,006 INFO    wandb-AsyncioManager-main:138052 [service_client.py:_forward_responses():134] Reached EOF.
+2026-05-01 14:01:09,006 INFO    wandb-AsyncioManager-main:138052 [mailbox.py:close():155] Closing mailbox, abandoning 1 handles.
+2026-05-01 14:01:09,596 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,610 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,611 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,612 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,612 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,613 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,614 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,614 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,615 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,615 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2026-05-01 14:01:09,622 ERROR   wandb-AsyncioManager-main:138052 [asyncio_manager.py:fn_wrap_exceptions():184] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\asyncio_manager.py", line 182, in fn_wrap_exceptions
+    await fn()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 45, in publish
+    await self._send_server_request(request)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 78, in _send_server_request
+    raise self._broken_exc.with_traceback(self._broken_tb)
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 87, in _send_server_request
+    await self._drain_writer()
+  File "C:\Users\diggy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\wandb\sdk\lib\service\service_client.py", line 96, in _drain_writer
+    await self._writer.drain()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 386, in drain
+    await self._protocol._drain_helper()
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3568.0_x64__qbz5n2kfra8p0\Lib\asyncio\streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
