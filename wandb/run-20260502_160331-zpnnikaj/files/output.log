@@ -1,0 +1,42 @@
+
+Training for up to 35 epochs (early stopping patience = 8)...
+                                                                                                   
+
+Epoch   1/35  train_loss: 1.2548  train_acc: 0.2577  val_loss: 1.1501  val_acc: 0.3489  val_f1: 0.2882  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.2882, val_loss: 1.1501)
+Epoch   2/35  train_loss: 1.1136  train_acc: 0.3296  val_loss: 1.0324  val_acc: 0.3957  val_f1: 0.3271  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.3271, val_loss: 1.0324)
+Epoch   3/35  train_loss: 1.0551  train_acc: 0.3549  val_loss: 0.9196  val_acc: 0.4628  val_f1: 0.4437  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.4437, val_loss: 0.9196)
+Epoch   4/35  train_loss: 1.0106  train_acc: 0.4075  val_loss: 0.8952  val_acc: 0.4688  val_f1: 0.4587  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.4587, val_loss: 0.8952)
+Epoch   5/35  train_loss: 0.9633  train_acc: 0.4219  val_loss: 0.8779  val_acc: 0.4976  val_f1: 0.4901  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.4901, val_loss: 0.8779)
+Epoch   6/35  train_loss: 0.9415  train_acc: 0.4458  val_loss: 0.8748  val_acc: 0.4784  val_f1: 0.4721  lr: 9.00e-04
+Epoch   7/35  train_loss: 0.8802  train_acc: 0.4647  val_loss: 0.8523  val_acc: 0.4904  val_f1: 0.4860  lr: 9.00e-04
+Epoch   8/35  train_loss: 0.8674  train_acc: 0.4852  val_loss: 0.7998  val_acc: 0.5432  val_f1: 0.5361  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.5361, val_loss: 0.7998)
+Epoch   9/35  train_loss: 0.8270  train_acc: 0.5024  val_loss: 0.8249  val_acc: 0.5096  val_f1: 0.4907  lr: 9.00e-04
+Epoch  10/35  train_loss: 0.8110  train_acc: 0.4951  val_loss: 0.8445  val_acc: 0.5144  val_f1: 0.5030  lr: 9.00e-04
+Epoch  11/35  train_loss: 0.8123  train_acc: 0.5295  val_loss: 0.8148  val_acc: 0.5228  val_f1: 0.4979  lr: 9.00e-04
+Epoch  12/35  train_loss: 0.7547  train_acc: 0.5248  val_loss: 0.7820  val_acc: 0.5216  val_f1: 0.5144  lr: 9.00e-04
+Epoch  13/35  train_loss: 0.7380  train_acc: 0.5512  val_loss: 0.9072  val_acc: 0.4928  val_f1: 0.4799  lr: 9.00e-04
+Epoch  14/35  train_loss: 0.6783  train_acc: 0.5569  val_loss: 0.7950  val_acc: 0.5516  val_f1: 0.5532  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.5532, val_loss: 0.7950)
+Epoch  15/35  train_loss: 0.6638  train_acc: 0.5679  val_loss: 0.8384  val_acc: 0.5540  val_f1: 0.5433  lr: 9.00e-04
+Epoch  16/35  train_loss: 0.6528  train_acc: 0.5756  val_loss: 0.7947  val_acc: 0.5743  val_f1: 0.5717  lr: 9.00e-04
+  --> New best model saved (val_f1: 0.5717, val_loss: 0.7947)
+Epoch  17/35  train_loss: 0.6180  train_acc: 0.5608  val_loss: 0.8038  val_acc: 0.5588  val_f1: 0.5594  lr: 9.00e-04
+Epoch  18/35  train_loss: 0.5893  train_acc: 0.6167  val_loss: 0.8319  val_acc: 0.5420  val_f1: 0.5298  lr: 4.50e-04
+Epoch  19/35  train_loss: 0.5335  train_acc: 0.6455  val_loss: 0.8397  val_acc: 0.5612  val_f1: 0.5592  lr: 4.50e-04
+Epoch  20/35  train_loss: 0.4592  train_acc: 0.6607  val_loss: 0.8403  val_acc: 0.5671  val_f1: 0.5597  lr: 4.50e-04
+Epoch  21/35  train_loss: 0.4776  train_acc: 0.6655  val_loss: 0.8349  val_acc: 0.5516  val_f1: 0.5434  lr: 4.50e-04
+Epoch  22/35  train_loss: 0.4366  train_acc: 0.6824  val_loss: 0.8723  val_acc: 0.5588  val_f1: 0.5511  lr: 4.50e-04
+Epoch  23/35  train_loss: 0.4020  train_acc: 0.6896  val_loss: 0.9661  val_acc: 0.5504  val_f1: 0.5475  lr: 4.50e-04
+Epoch  24/35  train_loss: 0.3906  train_acc: 0.6958  val_loss: 0.9441  val_acc: 0.5588  val_f1: 0.5534  lr: 2.25e-04
+
+Early stopping triggered at epoch 24.
+Loss curves saved to: results\peak_attn_ablation_s42\loss_curve.png
+
+Best model saved to : results\peak_attn_ablation_s42\best_model.pt
+Norm stats saved to : results\peak_attn_ablation_s42\norm_stats.pt
