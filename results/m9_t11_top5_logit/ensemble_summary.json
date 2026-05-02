@@ -1,0 +1,22 @@
+{
+  "ensemble_name": "m9_t11_top5_logit",
+  "run_names": [
+    "m9_t11_seed123",
+    "m9_t11_seed2025",
+    "m9_t11_seed31415",
+    "m9_t11_seed27182",
+    "m9_t11_seed7"
+  ],
+  "weights": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "weighted_f1": 0.6545837598628745,
+  "feature_type": "mfcc",
+  "n_features": 40,
+  "include_deltas": true,
+  "submission_csv": "results\\m9_t11_top5_logit\\m9_t11_top5_logit.csv"
+}
