@@ -36,7 +36,7 @@ from dataloader import (
     WIN_SIZE,
     SpeechEmotionDataset,
 )
-from model import BidirectionalMambaSER
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
 
 
 def parse_run_names(raw: str) -> list[str]:
@@ -68,6 +68,15 @@ def build_model_from_stats(stats: dict[str, Any], device: torch.device) -> torch
             frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
             fusion_type=str(model_config.get("fusion_type", "concat")),
             pooling_type=str(model_config.get("pooling_type", "meanmax")),
+        )
+    elif model_name == "bilstm_attention":
+        model = CNNBiLSTMAttentionSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            cnn_channels=int(model_config.get("cnn_channels", 64)),
+            hidden_size=int(model_config.get("hidden_size", 256)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.3)),
         )
     elif model_name == "baseline":
         input_size = n_features * in_channels

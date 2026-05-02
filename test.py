@@ -38,7 +38,7 @@ from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
                         SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
 from baseline import BaselineLSTM
-from model import BidirectionalMambaSER
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
 from wandb_compat import wandb
 
 
@@ -214,6 +214,15 @@ def main(args):
             frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
             fusion_type=str(model_config.get("fusion_type", "concat")),
             pooling_type=str(model_config.get("pooling_type", "meanmax")),
+        ).to(device)
+    elif model_name == "bilstm_attention":
+        model = CNNBiLSTMAttentionSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            cnn_channels=int(model_config.get("cnn_channels", 64)),
+            hidden_size=int(model_config.get("hidden_size", 256)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.3)),
         ).to(device)
     else:
         input_size = n_features * in_channels
