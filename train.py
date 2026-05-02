@@ -1,328 +1,271 @@
 """
 train.py
 ========
-Training and validation pipeline for the speech emotion recognition challenge.
-
-Trains the baseline model, saves the best checkpoint, and plots loss curves.
-Integrates Weights & Biases (wandb) for experiment tracking.
+Training script for the CNN+BiLSTM+Attention SER model.
 
 Usage:
-    python train.py --data_dir dataset --results_dir results --team_name "Team Awesome"
+    python train.py --data_dir dataset --results_dir results --team_name MyTeam
 
-    # Optional: give the run a custom name
-    python train.py --data_dir dataset --results_dir results --team_name "Team Awesome" --run_name baseline_experiment
-
-Outputs saved to <results_dir>/<team_name>/:
-    best_model.pt     <- model weights with the lowest validation loss
-    checkpoint.pt     <- latest checkpoint for resuming interrupted runs
-    norm_stats.pt     <- training set normalisation statistics (needed by test.py)
-    loss_curve.png    <- training and validation loss/accuracy curves
+Saves to results/<team_name>/:
+    best_model.pt   - weights of the best validation epoch
+    checkpoint.pt   - rolling checkpoint for resuming
+    norm_stats.pt   - mean/std computed from training data
+    loss_curve.png  - training curves
 """
 
 import os
+import random
 import argparse
 import wandb
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+from sklearn.metrics import f1_score
 
 from dataloader import get_dataloaders
-from baseline import BaselineLSTM
+from model import SERModel
+
+# set to offline so wandb doesn't crash if no API key
+os.environ.setdefault('WANDB_MODE', 'offline')
 
 
-# ── Default hyperparameters ────────────────────────────────────────────────────
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+
+
+# hyperparameters
 CONFIG = {
-    "hidden_size":   128,
-    "num_layers":    2,
-    "dropout":       0.0,
-    "batch_size":    64,
-    "learning_rate": 1e-2,
-    "num_epochs":    100,
-    "patience":      10,      # early stopping patience (epochs)
-    "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
-    "val_split":     0.15,
+    'batch_size': 32,
+    'lr': 3e-4,
+    'weight_decay': 1e-4,
+    'epochs': 80,
+    'patience': 15,
+    'label_smoothing': 0.1,
+    'grad_clip': 5.0,
+    'val_split': 0.15,
+    # cosine annealing with warm restarts
+    'T_0': 10,
+    'T_mult': 2,
 }
 
 
-# ── One training epoch ─────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, criterion, optimizer, device):
-    """Run one training epoch. Logs step-level loss to wandb."""
+def train_epoch(model, loader, criterion, optimizer, scaler, device):
     model.train()
-    total_loss, correct, total = 0.0, 0, 0
+    total_loss = 0.0
+    all_preds, all_labels = [], []
 
-    pbar = tqdm(loader, desc="  Train", leave=False)
-    for specs, labels in pbar:
+    for specs, labels in tqdm(loader, desc='  train', leave=False):
         specs, labels = specs.to(device), labels.to(device)
-
         optimizer.zero_grad()
-        logits = model(specs)
-        loss   = criterion(logits, labels)
-        loss.backward()
-        optimizer.step()
+
+        with torch.amp.autocast(device_type=device.type,
+                                enabled=(device.type == 'cuda')):
+            logits = model(specs)
+            loss = criterion(logits, labels)
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), CONFIG['grad_clip'])
+        scaler.step(optimizer)
+        scaler.update()
 
         total_loss += loss.item() * specs.size(0)
-        correct    += (logits.argmax(dim=1) == labels).sum().item()
-        total      += specs.size(0)
+        all_preds.extend(logits.argmax(1).cpu().tolist())
+        all_labels.extend(labels.cpu().tolist())
+        try:
+            wandb.log({'train/step_loss': loss.item()})
+        except Exception:
+            pass
 
-        # Step-level logging
-        wandb.log({"train/step_loss": loss.item()})
-
-        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-
-    return total_loss / total, correct / total
+    avg_loss = total_loss / len(loader.dataset)
+    wf1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    return avg_loss, wf1
 
 
-# ── Validation epoch ───────────────────────────────────────────────────────────
-def validate(model, loader, criterion, device):
-    """Run one validation epoch."""
+def val_epoch(model, loader, criterion, device):
     model.eval()
-    total_loss, correct, total = 0.0, 0, 0
+    total_loss = 0.0
+    all_preds, all_labels = [], []
 
-    pbar = tqdm(loader, desc="  Val  ", leave=False)
     with torch.no_grad():
-        for specs, labels in pbar:
+        for specs, labels in tqdm(loader, desc='  val  ', leave=False):
             specs, labels = specs.to(device), labels.to(device)
-            logits = model(specs)
-            loss   = criterion(logits, labels)
+            with torch.amp.autocast(device_type=device.type,
+                                    enabled=(device.type == 'cuda')):
+                logits = model(specs)
+                loss = criterion(logits, labels)
 
             total_loss += loss.item() * specs.size(0)
-            correct    += (logits.argmax(dim=1) == labels).sum().item()
-            total      += specs.size(0)
+            all_preds.extend(logits.argmax(1).cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
 
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+    avg_loss = total_loss / len(loader.dataset)
+    wf1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    return avg_loss, wf1
 
-    return total_loss / total, correct / total
 
-
-# ── Loss curve plotting ────────────────────────────────────────────────────────
-def plot_curves(train_losses, val_losses, train_accs, val_accs,
-                save_path, stopped_epoch=None):
+def plot_curves(train_losses, val_losses, train_f1s, val_f1s, path, stopped=None):
     epochs = range(1, len(train_losses) + 1)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Loss
-    ax1.plot(epochs, train_losses, "b-o", markersize=4, label="Train")
-    ax1.plot(epochs, val_losses,   "r-o", markersize=4, label="Validation")
-    if stopped_epoch:
-        ax1.axvline(x=stopped_epoch, color="gray", linestyle="--",
-                    label=f"Early stop (epoch {stopped_epoch})")
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Cross-entropy loss")
-    ax1.set_title("Loss")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    ax1.plot(epochs, train_losses, label='train')
+    ax1.plot(epochs, val_losses, label='val')
+    if stopped:
+        ax1.axvline(stopped, ls='--', color='gray', label=f'stopped @ {stopped}')
+    ax1.set_title('Loss'); ax1.set_xlabel('Epoch')
+    ax1.legend(); ax1.grid(alpha=0.3)
 
-    # Accuracy
-    ax2.plot(epochs, [a * 100 for a in train_accs], "b-o", markersize=4,
-             label="Train")
-    ax2.plot(epochs, [a * 100 for a in val_accs],   "r-o", markersize=4,
-             label="Validation")
-    if stopped_epoch:
-        ax2.axvline(x=stopped_epoch, color="gray", linestyle="--",
-                    label=f"Early stop (epoch {stopped_epoch})")
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Accuracy (%)")
-    ax2.set_title("Accuracy")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    ax2.plot(epochs, train_f1s, label='train')
+    ax2.plot(epochs, val_f1s, label='val')
+    if stopped:
+        ax2.axvline(stopped, ls='--', color='gray', label=f'stopped @ {stopped}')
+    ax2.set_title('Weighted F1'); ax2.set_xlabel('Epoch')
+    ax2.legend(); ax2.grid(alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"Loss curves saved to: {save_path}")
+    print(f'curves saved -> {path}')
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
 def main(args):
-    output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    set_seed()
+    out_dir = Path(args.results_dir) / args.team_name.replace(' ', '_')
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_path = output_dir / "checkpoint.pt"
-    best_model_path = output_dir / "best_model.pt"
-    norm_stats_path = output_dir / "norm_stats.pt"
+    ckpt_path = out_dir / 'checkpoint.pt'
+    best_path = out_dir / 'best_model.pt'
+    stats_path = out_dir / 'norm_stats.pt'
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'device: {device}')
 
-    # ── Data ──────────────────────────────────────────────────────────────────
-    print("\nLoading data...")
+    print('\nloading data...')
     train_loader, val_loader, _, mean, std = get_dataloaders(
-        data_dir   = args.data_dir,
-        val_split  = CONFIG["val_split"],
-        batch_size = CONFIG["batch_size"],
+        data_dir=args.data_dir,
+        val_split=CONFIG['val_split'],
+        batch_size=CONFIG['batch_size'],
     )
-    torch.save({"mean": mean, "std": std}, norm_stats_path)
+    torch.save({'mean': mean, 'std': std}, stats_path)
 
-    # ── Model, optimiser, scheduler ───────────────────────────────────────────
-    model = BaselineLSTM(
-        hidden_size = CONFIG["hidden_size"],
-        num_layers  = CONFIG["num_layers"],
-        dropout     = CONFIG["dropout"],
-    ).to(device)
-    print(f"\nModel: {model.__class__.__name__}")
-    print(f"Trainable parameters: {model.count_parameters():,}")
+    model = SERModel(dropout=0.3).to(device)
+    print(f'model params: {model.count_parameters():,}')
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["learning_rate"])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=CONFIG["patience_lr"]
+    criterion = nn.CrossEntropyLoss(label_smoothing=CONFIG['label_smoothing'])
+    optimizer = torch.optim.AdamW(model.parameters(),
+                                  lr=CONFIG['lr'],
+                                  weight_decay=CONFIG['weight_decay'])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=CONFIG['T_0'], T_mult=CONFIG['T_mult'], eta_min=1e-6
     )
+    scaler = torch.amp.GradScaler(device=device.type,
+                                  enabled=(device.type == 'cuda'))
 
-    # ── Resume logic ──────────────────────────────────────────────────────────
-    start_epoch      = 0
-    best_val_loss    = float("inf")
-    patience_counter = 0
-    stopped_epoch    = None
+    # state for training loop
+    start_epoch = 0
+    best_f1 = 0.0
+    patience_cnt = 0
+    stopped_epoch = None
     train_losses, val_losses = [], []
-    train_accs,   val_accs   = [], []
-    wandb_id = wandb.util.generate_id()   # new ID by default
+    train_f1s, val_f1s = [], []
+    wandb_id = wandb.util.generate_id()
 
-    if checkpoint_path.exists():
-        print(f"\nFound checkpoint at {checkpoint_path}. Resuming training...")
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        start_epoch      = ckpt["epoch"] + 1
-        best_val_loss    = ckpt["best_val_loss"]
-        patience_counter = ckpt["patience_counter"]
-        train_losses     = ckpt["train_losses"]
-        val_losses       = ckpt["val_losses"]
-        train_accs       = ckpt["train_accs"]
-        val_accs         = ckpt["val_accs"]
-        wandb_id         = ckpt["wandb_id"]
-        print(f"Resuming from epoch {start_epoch} | "
-              f"best val loss so far: {best_val_loss:.4f}")
-    else:
-        print("No checkpoint found. Starting from scratch.")
+    # resume from checkpoint if one exists
+    if ckpt_path.exists():
+        print(f'resuming from {ckpt_path}')
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt['model'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        scheduler.load_state_dict(ckpt['scheduler'])
+        scaler.load_state_dict(ckpt['scaler'])
+        start_epoch = ckpt['epoch'] + 1
+        best_f1 = ckpt['best_f1']
+        patience_cnt = ckpt['patience_cnt']
+        train_losses = ckpt['train_losses']
+        val_losses = ckpt['val_losses']
+        train_f1s = ckpt['train_f1s']
+        val_f1s = ckpt['val_f1s']
+        wandb_id = ckpt['wandb_id']
+        print(f'epoch {start_epoch}, best val f1 so far: {best_f1:.4f}')
 
-    # ── Wandb initialisation ──────────────────────────────────────────────────
-    # resume="allow" appends to the existing run when wandb_id matches
-    run_name = args.run_name or (
-        f"baseline-lr{CONFIG['learning_rate']}-h{CONFIG['hidden_size']}"
-    )
-    wandb.init(
-        project = "CSE 5526 - Programming Challenge",
-        name    = run_name,
-        config  = CONFIG,
-        id      = wandb_id,
-        resume  = "allow",
-    )
-    # Define epoch as the x-axis for all epoch-level metrics
-    wandb.define_metric("epoch")
-    wandb.define_metric("epoch/*", step_metric="epoch")
+    run_name = args.run_name or 'cnn-bilstm-attn'
+    wandb.init(project='CSE 5526 - Programming Challenge', name=run_name,
+               config=CONFIG, id=wandb_id, resume='allow')
+    wandb.define_metric('epoch')
+    wandb.define_metric('epoch/*', step_metric='epoch')
 
-    # ── Training loop ─────────────────────────────────────────────────────────
-    print(f"\nTraining for up to {CONFIG['num_epochs']} epochs "
-          f"(early stopping patience = {CONFIG['patience']})...\n")
+    print(f'\ntraining for up to {CONFIG["epochs"]} epochs '
+          f'(patience={CONFIG["patience"]})...\n')
 
-    for epoch in range(start_epoch, CONFIG["num_epochs"]):
+    for epoch in range(start_epoch, CONFIG['epochs']):
+        train_loss, train_f1 = train_epoch(
+            model, train_loader, criterion, optimizer, scaler, device)
+        val_loss, val_f1 = val_epoch(model, val_loader, criterion, device)
 
-        train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
-        )
-        val_loss, val_acc = validate(
-            model, val_loader, criterion, device
-        )
-        scheduler.step(val_loss)
+        scheduler.step(epoch + 1)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-        train_accs.append(train_acc)
-        val_accs.append(val_acc)
+        train_f1s.append(train_f1)
+        val_f1s.append(val_f1)
 
-        lr = optimizer.param_groups[0]["lr"]
-
-        # Epoch-level wandb logging
+        lr = optimizer.param_groups[0]['lr']
         wandb.log({
-            "epoch":             epoch,
-            "epoch/train_loss":  train_loss,
-            "epoch/val_loss":    val_loss,
-            "epoch/train_acc":   train_acc * 100,
-            "epoch/val_acc":     val_acc   * 100,
-            "epoch/lr":          lr,
+            'epoch': epoch,
+            'epoch/train_loss': train_loss, 'epoch/val_loss': val_loss,
+            'epoch/train_f1': train_f1, 'epoch/val_f1': val_f1,
+            'epoch/lr': lr,
         })
 
-        print(f"Epoch {epoch + 1:>3}/{CONFIG['num_epochs']}  "
-              f"train_loss: {train_loss:.4f}  train_acc: {train_acc:.4f}  "
-              f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}  "
-              f"lr: {lr:.2e}")
+        print(f'epoch {epoch+1:>3}  '
+              f'train_loss={train_loss:.4f}  train_f1={train_f1:.4f}  '
+              f'val_loss={val_loss:.4f}  val_f1={val_f1:.4f}  lr={lr:.2e}')
 
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss    = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), best_model_path)
-            print(f"  --> New best model saved (val_loss: {best_val_loss:.4f})")
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            patience_cnt = 0
+            torch.save(model.state_dict(), best_path)
+            print(f'  -> saved best (val_f1={best_f1:.4f})')
         else:
-            patience_counter += 1
-            if patience_counter >= CONFIG["patience"]:
+            patience_cnt += 1
+            if patience_cnt >= CONFIG['patience']:
                 stopped_epoch = epoch + 1
-                print(f"\nEarly stopping triggered at epoch {stopped_epoch}.")
+                print(f'\nearly stopping at epoch {stopped_epoch}')
                 break
 
-        # Save latest checkpoint for resuming interrupted runs
         torch.save({
-            "epoch":                epoch,
-            "model_state_dict":     model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "best_val_loss":        best_val_loss,
-            "patience_counter":     patience_counter,
-            "train_losses":         train_losses,
-            "val_losses":           val_losses,
-            "train_accs":           train_accs,
-            "val_accs":             val_accs,
-            "wandb_id":             wandb_id,
-        }, checkpoint_path)
+            'epoch': epoch,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'scaler': scaler.state_dict(),
+            'best_f1': best_f1,
+            'patience_cnt': patience_cnt,
+            'train_losses': train_losses, 'val_losses': val_losses,
+            'train_f1s': train_f1s, 'val_f1s': val_f1s,
+            'wandb_id': wandb_id,
+        }, ckpt_path)
 
-    # ── Post-training ──────────────────────────────────────────────────────────
-    plot_curves(
-        train_losses, val_losses,
-        train_accs,   val_accs,
-        save_path     = output_dir / "loss_curve.png",
-        stopped_epoch = stopped_epoch,
-    )
-
-    # Upload final loss curve image to wandb
-    wandb.log({"loss_curve": wandb.Image(str(output_dir / "loss_curve.png"))})
-
-    print(f"\nBest model saved to : {best_model_path}")
-    print(f"Norm stats saved to : {norm_stats_path}")
+    curve_path = out_dir / 'loss_curve.png'
+    plot_curves(train_losses, val_losses, train_f1s, val_f1s,
+                curve_path, stopped_epoch)
+    wandb.log({'loss_curve': wandb.Image(str(curve_path))})
+    print(f'\nbest val f1: {best_f1:.4f}')
+    print(f'model saved to: {best_path}')
     wandb.finish()
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Train the speech emotion recognition baseline."
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="dataset",
-        help="Root dataset directory containing train/ and test/ "
-             "(default: dataset)",
-    )
-    parser.add_argument(
-        "--results_dir",
-        type=str,
-        default="results",
-        help="Root directory where results are saved (default: results)",
-    )
-    parser.add_argument(
-        "--team_name",
-        type=str,
-        default="baseline",
-        help="Team name — output is saved to <results_dir>/<team_name>/ "
-             "(default: baseline)",
-    )
-    parser.add_argument(
-        "--run_name",
-        type=str,
-        default='baseline_train',
-        help="Optional wandb run name (default: auto-generated from config)",
-    )
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', type=str, default='dataset')
+    parser.add_argument('--results_dir', type=str, default='results')
+    parser.add_argument('--team_name', type=str, default='baseline')
+    parser.add_argument('--run_name', type=str, default=None)
     main(parser.parse_args())
