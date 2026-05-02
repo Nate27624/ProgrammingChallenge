@@ -1,0 +1,104 @@
+{
+  "base_name": "m9_t11",
+  "seeds": [
+    42,
+    1337,
+    7,
+    17,
+    123,
+    2025,
+    27182,
+    31415
+  ],
+  "results_dir": "results",
+  "rows_ranked": [
+    {
+      "seed": 123,
+      "run_name": "m9_t11_seed123",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 1425.1406600475311,
+      "checkpoint_found": true,
+      "best_val_f1": 0.6706771674578723,
+      "best_val_loss": 0.6771376990585876,
+      "last_epoch_idx": 59
+    },
+    {
+      "seed": 2025,
+      "run_name": "m9_t11_seed2025",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 1419.4001605510712,
+      "checkpoint_found": true,
+      "best_val_f1": 0.6683529726087112,
+      "best_val_loss": 0.6677619252416441,
+      "last_epoch_idx": 59
+    },
+    {
+      "seed": 31415,
+      "run_name": "m9_t11_seed31415",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 1413.7435190677643,
+      "checkpoint_found": true,
+      "best_val_f1": 0.6548075294020037,
+      "best_val_loss": 0.6742009602004676,
+      "last_epoch_idx": 59
+    },
+    {
+      "seed": 27182,
+      "run_name": "m9_t11_seed27182",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 1407.8285856246948,
+      "checkpoint_found": true,
+      "best_val_f1": 0.6535520365798497,
+      "best_val_loss": 0.6645512605885522,
+      "last_epoch_idx": 59
+    },
+    {
+      "seed": 7,
+      "run_name": "m9_t11_seed7",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 1191.5313611030579,
+      "checkpoint_found": true,
+      "best_val_f1": 0.6519728122123923,
+      "best_val_loss": 0.6933400538756693,
+      "last_epoch_idx": 48
+    },
+    {
+      "seed": 1337,
+      "run_name": "m9_t11_seed1337",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 931.8501172065735,
+      "checkpoint_found": true,
+      "best_val_f1": 0.6448045643956907,
+      "best_val_loss": 0.6327870097949351,
+      "last_epoch_idx": 37
+    },
+    {
+      "seed": 42,
+      "run_name": "m9_t11_seed42",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 984.741849899292,
+      "checkpoint_found": true,
+      "best_val_f1": 0.6436520980990101,
+      "best_val_loss": 0.6486138458446347,
+      "last_epoch_idx": 39
+    },
+    {
+      "seed": 17,
+      "run_name": "m9_t11_seed17",
+      "return_code": 0,
+      "skipped": false,
+      "duration_sec": 1044.5299770832062,
+      "checkpoint_found": true,
+      "best_val_f1": 0.641344164203094,
+      "best_val_loss": 0.6380260900484858,
+      "last_epoch_idx": 42
+    }
+  ]
+}
