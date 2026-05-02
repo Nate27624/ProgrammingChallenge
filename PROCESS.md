@@ -326,6 +326,24 @@ Purpose:
 
 - Reduce promotion of lucky high-noise candidates during short-epoch screening.
 
+## 17. Ujwal Branch Cross-Learning (2026-05-02)
+
+Reviewed `origin/Ujwal` and extracted the useful model idea:
+
+- CNN + BiLSTM + attention pooling (`emotion peak` hypothesis).
+
+What was ported into current branch:
+
+- Added `CNNBiLSTMAttentionSER` in `model.py`.
+- Added `--model_name bilstm_attention` support to `train.py`.
+- Added `bilstm_attention` loading path to `test.py`.
+- Updated `logit_ensemble.py` so ensembles can mix Mamba and BiLSTM-attention runs.
+
+Why this matters:
+
+- Same-family Mamba seed sweeps plateaued around `~0.67`.
+- Cross-architecture diversity is now enabled for ensemble lift.
+
 ## 15. Optuna Throughput/Visibility Fix (2026-05-01)
 
 Observed issue:
