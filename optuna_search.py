@@ -36,7 +36,7 @@ from dataloader import (
     N_MFCC,
     MAX_FRAMES,
 )
-from model import BidirectionalMambaSER
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
 
 
 try:
@@ -678,6 +678,90 @@ def sample_stage_b_config(
     }
 
 
+def sample_bilstm_attention_config(
+    trial: optuna.Trial,
+    args: argparse.Namespace,
+) -> Dict[str, float | int | str]:
+    # Focused training-parameter search for CNN+BiLSTM+attention.
+    cnn_channels = trial.suggest_categorical("cnn_channels", [48, 64, 80])
+    hidden_size = trial.suggest_categorical("hidden_size", [192, 256, 320])
+    num_layers = trial.suggest_categorical("num_layers", [1, 2, 3])
+
+    capacity_score = 0
+    if cnn_channels >= 64:
+        capacity_score += 1
+    if hidden_size >= 256:
+        capacity_score += 1
+    if num_layers >= 2:
+        capacity_score += 1
+
+    if capacity_score >= 2:
+        dropout_min, dropout_max = 0.30, 0.55
+        wd_min, wd_max = 5e-5, 2e-3
+        ls_min, ls_max = 0.04, 0.14
+        tm_lo, tm_hi, tm_step = 20, 48, 4
+        fm_lo, fm_hi, fm_step = 6, 16, 2
+        tmask_min, tmask_max = 2, 4
+        fmask_min, fmask_max = 2, 4
+    else:
+        dropout_min, dropout_max = 0.20, 0.45
+        wd_min, wd_max = 1e-5, 8e-4
+        ls_min, ls_max = 0.02, 0.10
+        tm_lo, tm_hi, tm_step = 16, 40, 4
+        fm_lo, fm_hi, fm_step = 4, 12, 2
+        tmask_min, tmask_max = 1, 3
+        fmask_min, fmask_max = 1, 3
+
+    dropout = trial.suggest_float("dropout", dropout_min, dropout_max)
+    weight_decay = trial.suggest_float("weight_decay", wd_min, wd_max, log=True)
+    label_smoothing = trial.suggest_float("label_smoothing", ls_min, ls_max)
+    loss_type = trial.suggest_categorical("loss_type", ["ce", "focal"])
+    if loss_type == "focal":
+        focal_gamma = trial.suggest_float("focal_gamma", 1.5, 3.0)
+    else:
+        focal_gamma = 2.0
+    class_weighting = trial.suggest_categorical("class_weighting", [False, True])
+    scheduler_type = trial.suggest_categorical(
+        "scheduler_type", ["plateau", "warmup_invsqrt", "warmup_cosine"]
+    )
+    warmup_epochs = trial.suggest_int("warmup_epochs", 2, 8)
+    min_lr_ratio = trial.suggest_float("min_lr_ratio", 0.05, 0.30)
+    max_grad_norm = trial.suggest_float("max_grad_norm", 0.5, 2.0)
+    mixup_alpha = trial.suggest_float("mixup_alpha", 0.1, 0.5)
+    mixup_prob = trial.suggest_float("mixup_prob", 0.1, 0.5)
+    speed_perturb_prob = trial.suggest_float("speed_perturb_prob", 0.0, 0.3)
+    speed_perturb_min = trial.suggest_categorical("speed_perturb_min", [0.9])
+    speed_perturb_max = trial.suggest_categorical("speed_perturb_max", [1.1])
+
+    return {
+        "model_name": "bilstm_attention",
+        "cnn_channels": cnn_channels,
+        "hidden_size": hidden_size,
+        "num_layers": num_layers,
+        "dropout": dropout,
+        "weight_decay": weight_decay,
+        "label_smoothing": label_smoothing,
+        "loss_type": loss_type,
+        "focal_gamma": focal_gamma,
+        "class_weighting": class_weighting,
+        "scheduler_type": scheduler_type,
+        "warmup_epochs": warmup_epochs,
+        "min_lr_ratio": min_lr_ratio,
+        "max_grad_norm": max_grad_norm,
+        "mixup_alpha": mixup_alpha,
+        "mixup_prob": mixup_prob,
+        "speed_perturb_prob": speed_perturb_prob,
+        "speed_perturb_min": speed_perturb_min,
+        "speed_perturb_max": speed_perturb_max,
+        "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [32, 64]),
+        "num_time_masks": trial.suggest_int("num_time_masks", tmask_min, tmask_max),
+        "time_mask_param": trial.suggest_int("time_mask_param", tm_lo, tm_hi, step=tm_step),
+        "num_freq_masks": trial.suggest_int("num_freq_masks", fmask_min, fmask_max),
+        "freq_mask_param": trial.suggest_int("freq_mask_param", fm_lo, fm_hi, step=fm_step),
+    }
+
+
 def build_objective(
     bundle: DataBundle,
     device: torch.device,
@@ -685,7 +769,11 @@ def build_objective(
     allowed_architectures: List[Tuple[str, str, str]],
 ):
     def objective(trial: optuna.Trial) -> float:
-        if args.mode == "stage_a":
+        if args.model_name == "bilstm_attention":
+            if args.mode != "stage_b":
+                raise ValueError("bilstm_attention search currently supports --mode stage_b only.")
+            config = sample_bilstm_attention_config(trial, args)
+        elif args.mode == "stage_a":
             config = sample_stage_a_config(trial, args)
         elif args.mode == "stage_b":
             config = sample_stage_b_config(trial, allowed_architectures)
@@ -711,9 +799,10 @@ def build_objective(
         for repeat_idx in range(stage_b_repeats):
             run_seed = args.seed + trial.number + repeat_offset + (repeat_idx * repeat_stride)
             set_global_seed(run_seed)
+            model_tag = str(config.get("model_name", "mamba"))
             print(
                 f"[trial {trial.number:03d}|repeat {repeat_idx+1}/{stage_b_repeats}] setup "
-                f"arch={config.get('arch_triplet', 'stage_a')} "
+                f"model={model_tag} "
                 f"bs={config['batch_size']} speed_p={float(config['speed_perturb_prob']):.2f} "
                 f"mixup_p={float(config['mixup_prob']):.2f} seed={run_seed}"
             )
@@ -739,20 +828,30 @@ def build_objective(
                 f"setup_sec={setup_t1 - setup_t0:.1f})"
             )
 
-            model = BidirectionalMambaSER(
-                in_channels=3,
-                n_features=args.n_features,
-                cnn_channels=int(config["cnn_channels"]),
-                d_model=int(config["mamba_d_model"]),
-                d_state=int(config["mamba_d_state"]),
-                d_conv=int(config["mamba_d_conv"]),
-                expand=int(config["mamba_expand"]),
-                num_layers=int(config["num_layers"]),
-                dropout=float(config["dropout"]),
-                frontend_type=str(config["frontend_type"]),
-                fusion_type=str(config["fusion_type"]),
-                pooling_type=str(config["pooling_type"]),
-            ).to(device)
+            if args.model_name == "bilstm_attention":
+                model = CNNBiLSTMAttentionSER(
+                    in_channels=3,
+                    n_features=args.n_features,
+                    cnn_channels=int(config["cnn_channels"]),
+                    hidden_size=int(config["hidden_size"]),
+                    num_layers=int(config["num_layers"]),
+                    dropout=float(config["dropout"]),
+                ).to(device)
+            else:
+                model = BidirectionalMambaSER(
+                    in_channels=3,
+                    n_features=args.n_features,
+                    cnn_channels=int(config["cnn_channels"]),
+                    d_model=int(config["mamba_d_model"]),
+                    d_state=int(config["mamba_d_state"]),
+                    d_conv=int(config["mamba_d_conv"]),
+                    expand=int(config["mamba_expand"]),
+                    num_layers=int(config["num_layers"]),
+                    dropout=float(config["dropout"]),
+                    frontend_type=str(config["frontend_type"]),
+                    fusion_type=str(config["fusion_type"]),
+                    pooling_type=str(config["pooling_type"]),
+                ).to(device)
 
             class_weights = None
             if bool(config["class_weighting"]):
@@ -888,6 +987,13 @@ def main():
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--study_name", type=str, default="mamba_phase3")
     parser.add_argument(
+        "--model_name",
+        type=str,
+        choices=["mamba", "bilstm_attention"],
+        default="mamba",
+        help="Model family to optimize (default: mamba).",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         choices=["stage_a", "stage_b"],
@@ -999,8 +1105,11 @@ def main():
         random_seed=args.seed,
     )
 
+    if args.model_name == "bilstm_attention" and args.mode == "stage_a":
+        raise ValueError("bilstm_attention is not supported in --mode stage_a. Use --mode stage_b.")
+
     allowed_architectures = all_architectures()
-    if args.mode == "stage_b":
+    if args.model_name == "mamba" and args.mode == "stage_b":
         if args.stage_b_architectures.strip():
             allowed_architectures = parse_architectures(args.stage_b_architectures)
         elif args.stage_b_from_study.strip():
@@ -1010,6 +1119,8 @@ def main():
                 top_k=args.stage_b_top_k,
             )
         print(f"Stage B architecture pool: {allowed_architectures}")
+    elif args.model_name == "bilstm_attention":
+        print("Stage B model pool: bilstm_attention (single architecture family).")
 
     if args.mode == "stage_a":
         grid_space = {
@@ -1060,29 +1171,36 @@ def main():
     )
     study.optimize(objective, n_trials=effective_trials, timeout=args.timeout, gc_after_trial=True)
 
-    best_arch = resolve_architecture_from_params(study.best_trial.params)
+    if args.model_name == "mamba":
+        best_arch = resolve_architecture_from_params(study.best_trial.params)
+        best_arch_dict: dict[str, str] | None = {
+            "frontend_type": best_arch[0],
+            "fusion_type": best_arch[1],
+            "pooling_type": best_arch[2],
+        }
+    else:
+        best_arch = None
+        best_arch_dict = None
     best_repeat_mean = study.best_trial.user_attrs.get("repeat_mean_f1")
     best_repeat_std = study.best_trial.user_attrs.get("repeat_std_f1")
     best_repeat_score = study.best_trial.user_attrs.get("repeat_robust_score")
     best = {
+        "model_name": args.model_name,
         "best_trial_number": study.best_trial.number,
         "best_objective_value": study.best_value,
         "best_repeat_mean_f1": best_repeat_mean,
         "best_repeat_std_f1": best_repeat_std,
         "best_repeat_robust_score": best_repeat_score,
         "best_params": study.best_trial.params,
-        "best_architecture": {
-            "frontend_type": best_arch[0],
-            "fusion_type": best_arch[1],
-            "pooling_type": best_arch[2],
-        },
+        "best_architecture": best_arch_dict,
     }
     with open(out_dir / "best_params.json", "w", encoding="utf-8") as f:
         json.dump(best, f, indent=2)
 
     trials_df = study.trials_dataframe()
     trials_df.to_csv(out_dir / "trials.csv", index=False)
-    write_architecture_ranking(study, out_dir / "architecture_ranking.json")
+    if args.model_name == "mamba":
+        write_architecture_ranking(study, out_dir / "architecture_ranking.json")
 
     retrain_cmd = [
         "python train.py",
@@ -1090,19 +1208,12 @@ def main():
         f"--results_dir {args.results_dir}",
         f"--team_name {args.study_name}_best",
         f"--run_name {args.study_name}_best",
-        "--model_name mamba",
+        f"--model_name {args.model_name}",
         f"--feature_type {args.feature_type}",
         "--include_deltas",
         "--specaugment",
-        f"--mamba_d_model {study.best_trial.params['mamba_d_model']}",
         f"--cnn_channels {study.best_trial.params['cnn_channels']}",
-        f"--mamba_d_state {study.best_trial.params['mamba_d_state']}",
         f"--num_layers {study.best_trial.params['num_layers']}",
-        f"--mamba_expand {study.best_trial.params['mamba_expand']}",
-        f"--mamba_d_conv {study.best_trial.params['mamba_d_conv']}",
-        f"--frontend_type {best_arch[0]}",
-        f"--fusion_type {best_arch[1]}",
-        f"--pooling_type {best_arch[2]}",
         f"--dropout {study.best_trial.params['dropout']}",
         f"--learning_rate {study.best_trial.params['learning_rate']}",
         f"--weight_decay {study.best_trial.params['weight_decay']}",
@@ -1110,7 +1221,7 @@ def main():
         f"--mixup_alpha {study.best_trial.params['mixup_alpha']}",
         f"--mixup_prob {study.best_trial.params['mixup_prob']}",
         f"--loss_type {study.best_trial.params['loss_type']}",
-        f"--focal_gamma {study.best_trial.params['focal_gamma']}",
+        f"--focal_gamma {study.best_trial.params.get('focal_gamma', 2.0)}",
         "--class_weighting" if study.best_trial.params["class_weighting"] else "--no_class_weighting",
         f"--label_smoothing {study.best_trial.params['label_smoothing']}",
         f"--scheduler_type {study.best_trial.params['scheduler_type']}",
@@ -1126,6 +1237,20 @@ def main():
         f"--speed_perturb_max {study.best_trial.params['speed_perturb_max']}",
         f"--seed {args.seed}",
     ]
+    if args.model_name == "mamba":
+        retrain_cmd.extend(
+            [
+                f"--mamba_d_model {study.best_trial.params['mamba_d_model']}",
+                f"--mamba_d_state {study.best_trial.params['mamba_d_state']}",
+                f"--mamba_expand {study.best_trial.params['mamba_expand']}",
+                f"--mamba_d_conv {study.best_trial.params['mamba_d_conv']}",
+                f"--frontend_type {best_arch[0]}",
+                f"--fusion_type {best_arch[1]}",
+                f"--pooling_type {best_arch[2]}",
+            ]
+        )
+    else:
+        retrain_cmd.append(f"--hidden_size {study.best_trial.params['hidden_size']}")
     with open(out_dir / "retrain_command.txt", "w", encoding="utf-8") as f:
         f.write(" \\\n  ".join(retrain_cmd) + "\n")
 
@@ -1138,7 +1263,10 @@ def main():
         )
     else:
         print(f"Best val_f1: {study.best_value:.4f}")
-    print(f"Best architecture: frontend={best_arch[0]}, fusion={best_arch[1]}, pooling={best_arch[2]}")
+    if args.model_name == "mamba":
+        print(f"Best architecture: frontend={best_arch[0]}, fusion={best_arch[1]}, pooling={best_arch[2]}")
+    else:
+        print("Best model family: bilstm_attention")
     print(f"Artifacts written to: {out_dir}")
     print(f"Retrain command saved to: {out_dir / 'retrain_command.txt'}")
 
