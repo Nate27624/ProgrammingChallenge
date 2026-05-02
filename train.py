@@ -82,6 +82,9 @@ CONFIG = {
     "speed_perturb_prob": 0.0,
     "speed_perturb_min": 0.9,
     "speed_perturb_max": 1.1,
+    "num_workers": 0,
+    "specaugment_on_gpu": True,
+    "feature_cache_dir": "",
     "seed": 42,
 }
 
@@ -179,6 +182,47 @@ def set_global_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def apply_specaugment_batch(
+    specs: torch.Tensor,
+    num_time_masks: int,
+    time_mask_param: int,
+    num_freq_masks: int,
+    freq_mask_param: int,
+) -> torch.Tensor:
+    """In-place style SpecAugment on GPU batch tensors (B, C, F, T)."""
+    if specs.ndim != 4:
+        return specs
+    bsz, _, n_freq, n_time = specs.shape
+    out = specs.clone()
+    max_f = max(0, min(freq_mask_param, n_freq))
+    max_t = max(0, min(time_mask_param, n_time))
+
+    if max_f > 0 and num_freq_masks > 0:
+        for _ in range(num_freq_masks):
+            widths = torch.randint(0, max_f + 1, (bsz,), device=out.device)
+            starts = torch.floor(
+                torch.rand(bsz, device=out.device) * (n_freq - widths + 1).float()
+            ).long()
+            for i in range(bsz):
+                width = int(widths[i].item())
+                if width > 0:
+                    start = int(starts[i].item())
+                    out[i, :, start:start + width, :] = 0.0
+
+    if max_t > 0 and num_time_masks > 0:
+        for _ in range(num_time_masks):
+            widths = torch.randint(0, max_t + 1, (bsz,), device=out.device)
+            starts = torch.floor(
+                torch.rand(bsz, device=out.device) * (n_time - widths + 1).float()
+            ).long()
+            for i in range(bsz):
+                width = int(widths[i].item())
+                if width > 0:
+                    start = int(starts[i].item())
+                    out[i, :, :, start:start + width] = 0.0
+    return out
+
+
 # ── One training epoch ─────────────────────────────────────────────────────────
 def train_one_epoch(
     model,
@@ -189,14 +233,30 @@ def train_one_epoch(
     max_grad_norm=None,
     mixup_alpha: float = 0.0,
     mixup_prob: float = 0.0,
+    apply_gpu_specaugment: bool = False,
+    num_time_masks: int = 0,
+    time_mask_param: int = 0,
+    num_freq_masks: int = 0,
+    freq_mask_param: int = 0,
 ):
     """Run one training epoch. Logs step-level loss to wandb."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
 
     pbar = tqdm(loader, desc="  Train", leave=False)
+    non_blocking = device.type == "cuda"
     for specs, labels in pbar:
-        specs, labels = specs.to(device), labels.to(device)
+        specs = specs.to(device, non_blocking=non_blocking)
+        labels = labels.to(device, non_blocking=non_blocking)
+
+        if apply_gpu_specaugment:
+            specs = apply_specaugment_batch(
+                specs,
+                num_time_masks=num_time_masks,
+                time_mask_param=time_mask_param,
+                num_freq_masks=num_freq_masks,
+                freq_mask_param=freq_mask_param,
+            )
 
         optimizer.zero_grad()
         use_mixup = (
@@ -241,9 +301,11 @@ def validate(model, loader, criterion, device):
     all_preds, all_labels = [], []
 
     pbar = tqdm(loader, desc="  Val  ", leave=False)
+    non_blocking = device.type == "cuda"
     with torch.no_grad():
         for specs, labels in pbar:
-            specs, labels = specs.to(device), labels.to(device)
+            specs = specs.to(device, non_blocking=non_blocking)
+            labels = labels.to(device, non_blocking=non_blocking)
             logits = model(specs)
             loss   = criterion(logits, labels)
 
@@ -344,6 +406,9 @@ def main(args):
     config["speed_perturb_prob"] = args.speed_perturb_prob
     config["speed_perturb_min"] = args.speed_perturb_min
     config["speed_perturb_max"] = args.speed_perturb_max
+    config["num_workers"] = args.num_workers
+    config["specaugment_on_gpu"] = args.specaugment_on_gpu
+    config["feature_cache_dir"] = args.feature_cache_dir
     config["seed"] = args.seed
 
     output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
@@ -357,6 +422,8 @@ def main(args):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    if device.type != "cuda":
+        config["specaugment_on_gpu"] = False
 
     # ── Data ──────────────────────────────────────────────────────────────────
     print("\nLoading data...")
@@ -364,8 +431,9 @@ def main(args):
         data_dir   = args.data_dir,
         val_split  = config["val_split"],
         batch_size = config["batch_size"],
+        num_workers = config["num_workers"],
         include_deltas = config["include_deltas"],
-        apply_specaugment = config["specaugment"],
+        apply_specaugment = config["specaugment"] and not config["specaugment_on_gpu"],
         num_time_masks = config["num_time_masks"],
         time_mask_param = config["time_mask_param"],
         num_freq_masks = config["num_freq_masks"],
@@ -375,7 +443,13 @@ def main(args):
         speed_perturb_max = config["speed_perturb_max"],
         feature_type = config["feature_type"],
         n_features = config["n_features"],
+        feature_cache_dir = config["feature_cache_dir"] or None,
     )
+    if config["specaugment"] and config["specaugment_on_gpu"]:
+        print(
+            "SpecAugment mode: GPU batch augmentation "
+            f"(time_masks={config['num_time_masks']}, freq_masks={config['num_freq_masks']})"
+        )
     torch.save(
         {
             "mean": mean,
@@ -565,6 +639,11 @@ def main(args):
             config["max_grad_norm"],
             mixup_alpha=config["mixup_alpha"],
             mixup_prob=config["mixup_prob"],
+            apply_gpu_specaugment=config["specaugment"] and config["specaugment_on_gpu"],
+            num_time_masks=config["num_time_masks"],
+            time_mask_param=config["time_mask_param"],
+            num_freq_masks=config["num_freq_masks"],
+            freq_mask_param=config["freq_mask_param"],
         )
         val_loss, val_acc, val_f1 = validate(
             model, val_loader, criterion, device
@@ -921,6 +1000,30 @@ if __name__ == "__main__":
         type=float,
         default=1.1,
         help="Maximum speed perturbation factor (default: 1.1).",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes (default: 0).",
+    )
+    parser.add_argument(
+        "--feature_cache_dir",
+        type=str,
+        default="",
+        help="Optional directory to cache extracted features across runs.",
+    )
+    parser.add_argument(
+        "--specaugment_on_gpu",
+        action="store_true",
+        default=True,
+        help="Apply SpecAugment on GPU after batch transfer (default: enabled).",
+    )
+    parser.add_argument(
+        "--specaugment_on_cpu",
+        action="store_false",
+        dest="specaugment_on_gpu",
+        help="Apply SpecAugment inside CPU dataset pipeline instead.",
     )
     parser.add_argument(
         "--seed",

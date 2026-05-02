@@ -95,6 +95,47 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
+def apply_specaugment_batch(
+    specs: torch.Tensor,
+    num_time_masks: int,
+    time_mask_param: int,
+    num_freq_masks: int,
+    freq_mask_param: int,
+) -> torch.Tensor:
+    """Batch SpecAugment on GPU tensors with shape (B, C, F, T)."""
+    if specs.ndim != 4:
+        return specs
+    bsz, _, n_freq, n_time = specs.shape
+    out = specs.clone()
+    max_f = max(0, min(freq_mask_param, n_freq))
+    max_t = max(0, min(time_mask_param, n_time))
+
+    if max_f > 0 and num_freq_masks > 0:
+        for _ in range(num_freq_masks):
+            widths = torch.randint(0, max_f + 1, (bsz,), device=out.device)
+            starts = torch.floor(
+                torch.rand(bsz, device=out.device) * (n_freq - widths + 1).float()
+            ).long()
+            for i in range(bsz):
+                width = int(widths[i].item())
+                if width > 0:
+                    start = int(starts[i].item())
+                    out[i, :, start:start + width, :] = 0.0
+
+    if max_t > 0 and num_time_masks > 0:
+        for _ in range(num_time_masks):
+            widths = torch.randint(0, max_t + 1, (bsz,), device=out.device)
+            starts = torch.floor(
+                torch.rand(bsz, device=out.device) * (n_time - widths + 1).float()
+            ).long()
+            for i in range(bsz):
+                width = int(widths[i].item())
+                if width > 0:
+                    start = int(starts[i].item())
+                    out[i, :, :, start:start + width] = 0.0
+    return out
+
+
 def set_global_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -143,6 +184,7 @@ def prepare_data_bundle(
     include_deltas: bool,
     val_split: float,
     random_seed: int,
+    feature_cache_dir: Path | None = None,
 ) -> DataBundle:
     train_dir = data_dir / "train"
     feature_transform, apply_db = build_feature_transform(feature_type, n_features)
@@ -154,6 +196,12 @@ def prepare_data_bundle(
         max_frames=MAX_FRAMES,
         include_deltas=include_deltas,
         apply_db=apply_db,
+        feature_cache_dir=(feature_cache_dir / "train_raw") if feature_cache_dir else None,
+        cache_tag=(
+            f"{feature_type}_{n_features}_frames{MAX_FRAMES}_"
+            f"{'deltas' if include_deltas else 'nodeltas'}_"
+            f"{'db' if apply_db else 'lin'}"
+        ),
     )
 
     all_indices = np.arange(len(full_train_raw))
@@ -187,6 +235,7 @@ def make_dataloaders_for_trial(
     batch_size: int,
     include_deltas: bool,
     num_workers: int,
+    apply_cpu_specaugment: bool,
     num_time_masks: int,
     time_mask_param: int,
     num_freq_masks: int,
@@ -194,6 +243,8 @@ def make_dataloaders_for_trial(
     speed_perturb_prob: float,
     speed_perturb_min: float,
     speed_perturb_max: float,
+    feature_cache_dir: Path | None = None,
+    cache_tag: str = "default",
 ) -> Tuple[DataLoader, DataLoader]:
     pin_memory = torch.cuda.is_available()
     train_dataset = SpeechEmotionDataset(
@@ -204,7 +255,7 @@ def make_dataloaders_for_trial(
         mean=bundle.mean,
         std=bundle.std,
         include_deltas=include_deltas,
-        apply_specaugment=True,
+        apply_specaugment=apply_cpu_specaugment,
         num_time_masks=num_time_masks,
         time_mask_param=time_mask_param,
         num_freq_masks=num_freq_masks,
@@ -213,6 +264,8 @@ def make_dataloaders_for_trial(
         speed_perturb_prob=speed_perturb_prob,
         speed_perturb_min=speed_perturb_min,
         speed_perturb_max=speed_perturb_max,
+        feature_cache_dir=(feature_cache_dir / "train") if feature_cache_dir else None,
+        cache_tag=cache_tag,
     )
     val_dataset = SpeechEmotionDataset(
         audio_dir=bundle.train_dir / "audio",
@@ -223,6 +276,8 @@ def make_dataloaders_for_trial(
         std=bundle.std,
         include_deltas=include_deltas,
         apply_db=bundle.apply_db,
+        feature_cache_dir=(feature_cache_dir / "val") if feature_cache_dir else None,
+        cache_tag=cache_tag,
     )
 
     train_subset = Subset(train_dataset, bundle.train_indices)
@@ -235,6 +290,7 @@ def make_dataloaders_for_trial(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True,
+        persistent_workers=num_workers > 0,
     )
     val_loader = DataLoader(
         val_subset,
@@ -242,6 +298,7 @@ def make_dataloaders_for_trial(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
     )
     return train_loader, val_loader
 
@@ -306,12 +363,27 @@ def train_one_epoch(
     max_grad_norm: float | None = None,
     mixup_alpha: float = 0.0,
     mixup_prob: float = 0.0,
+    apply_gpu_specaugment: bool = False,
+    num_time_masks: int = 0,
+    time_mask_param: int = 0,
+    num_freq_masks: int = 0,
+    freq_mask_param: int = 0,
 ) -> Tuple[float, float]:
     model.train()
     total_loss, correct, total = 0.0, 0, 0
 
+    non_blocking = device.type == "cuda"
     for specs, labels in loader:
-        specs, labels = specs.to(device), labels.to(device)
+        specs = specs.to(device, non_blocking=non_blocking)
+        labels = labels.to(device, non_blocking=non_blocking)
+        if apply_gpu_specaugment:
+            specs = apply_specaugment_batch(
+                specs,
+                num_time_masks=num_time_masks,
+                time_mask_param=time_mask_param,
+                num_freq_masks=num_freq_masks,
+                freq_mask_param=freq_mask_param,
+            )
         optimizer.zero_grad()
         use_mixup = (
             mixup_alpha > 0.0
@@ -355,8 +427,10 @@ def validate(
     all_preds, all_labels = [], []
 
     with torch.no_grad():
+        non_blocking = device.type == "cuda"
         for specs, labels in loader:
-            specs, labels = specs.to(device), labels.to(device)
+            specs = specs.to(device, non_blocking=non_blocking)
+            labels = labels.to(device, non_blocking=non_blocking)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 logits = model(specs)
                 loss = criterion(logits, labels)
@@ -813,6 +887,9 @@ def build_objective(
                 batch_size=int(config["batch_size"]),
                 include_deltas=True,
                 num_workers=args.num_workers,
+                apply_cpu_specaugment=bool(
+                    (not args.specaugment_on_gpu) or device.type != "cuda"
+                ),
                 num_time_masks=int(config["num_time_masks"]),
                 time_mask_param=int(config["time_mask_param"]),
                 num_freq_masks=int(config["num_freq_masks"]),
@@ -820,6 +897,11 @@ def build_objective(
                 speed_perturb_prob=float(config["speed_perturb_prob"]),
                 speed_perturb_min=float(config["speed_perturb_min"]),
                 speed_perturb_max=float(config["speed_perturb_max"]),
+                feature_cache_dir=(Path(args.feature_cache_dir) if args.feature_cache_dir else None),
+                cache_tag=(
+                    f"{args.feature_type}_{args.n_features}_frames{MAX_FRAMES}_"
+                    f"deltas_{'db' if bundle.apply_db else 'lin'}"
+                ),
             )
             setup_t1 = time.perf_counter()
             print(
@@ -911,6 +993,13 @@ def build_objective(
                         max_grad_norm=float(config["max_grad_norm"]),
                         mixup_alpha=float(config["mixup_alpha"]),
                         mixup_prob=float(config["mixup_prob"]),
+                        apply_gpu_specaugment=bool(
+                            args.specaugment_on_gpu and device.type == "cuda"
+                        ),
+                        num_time_masks=int(config["num_time_masks"]),
+                        time_mask_param=int(config["time_mask_param"]),
+                        num_freq_masks=int(config["num_freq_masks"]),
+                        freq_mask_param=int(config["freq_mask_param"]),
                     )
                     val_loss, val_acc, val_f1 = validate(
                         model, val_loader, criterion, device, amp_enabled
@@ -1013,6 +1102,24 @@ def main():
     parser.add_argument("--n_features", type=int, default=N_MFCC)
     parser.add_argument("--val_split", type=float, default=0.15)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument(
+        "--feature_cache_dir",
+        type=str,
+        default="",
+        help="Optional directory to cache extracted features across trials.",
+    )
+    parser.add_argument(
+        "--specaugment_on_gpu",
+        action="store_true",
+        default=True,
+        help="Apply SpecAugment on GPU batch tensors (default: enabled).",
+    )
+    parser.add_argument(
+        "--specaugment_on_cpu",
+        action="store_false",
+        dest="specaugment_on_gpu",
+        help="Apply SpecAugment in CPU dataset transform path instead.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--amp",
@@ -1103,6 +1210,7 @@ def main():
         include_deltas=True,
         val_split=args.val_split,
         random_seed=args.seed,
+        feature_cache_dir=Path(args.feature_cache_dir) if args.feature_cache_dir else None,
     )
 
     if args.model_name == "bilstm_attention" and args.mode == "stage_a":
@@ -1212,6 +1320,7 @@ def main():
         f"--feature_type {args.feature_type}",
         "--include_deltas",
         "--specaugment",
+        "--specaugment_on_gpu",
         f"--cnn_channels {study.best_trial.params['cnn_channels']}",
         f"--num_layers {study.best_trial.params['num_layers']}",
         f"--dropout {study.best_trial.params['dropout']}",
@@ -1235,8 +1344,11 @@ def main():
         f"--speed_perturb_prob {study.best_trial.params['speed_perturb_prob']}",
         f"--speed_perturb_min {study.best_trial.params['speed_perturb_min']}",
         f"--speed_perturb_max {study.best_trial.params['speed_perturb_max']}",
+        f"--num_workers {args.num_workers}",
         f"--seed {args.seed}",
     ]
+    if args.feature_cache_dir:
+        retrain_cmd.append(f"--feature_cache_dir {args.feature_cache_dir}")
     if args.model_name == "mamba":
         retrain_cmd.extend(
             [

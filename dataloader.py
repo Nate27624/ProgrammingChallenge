@@ -25,6 +25,7 @@ Usage:
     )
 """
 
+import hashlib
 import torch
 import torchaudio
 import torchaudio.transforms as T
@@ -79,7 +80,8 @@ class SpeechEmotionDataset(Dataset):
                  num_time_masks=2, time_mask_param=24,
                  num_freq_masks=2, freq_mask_param=8,
                  apply_db=False, normalize_waveform_peak=True,
-                 speed_perturb_prob=0.0, speed_perturb_min=0.9, speed_perturb_max=1.1):
+                 speed_perturb_prob=0.0, speed_perturb_min=0.9, speed_perturb_max=1.1,
+                 feature_cache_dir=None, cache_tag=None):
         self.audio_dir  = Path(audio_dir)
         self.transform  = transform
         self.max_frames = max_frames
@@ -94,6 +96,8 @@ class SpeechEmotionDataset(Dataset):
         self.speed_perturb_prob = float(speed_perturb_prob)
         self.speed_perturb_min = float(speed_perturb_min)
         self.speed_perturb_max = float(speed_perturb_max)
+        self.feature_cache_dir = Path(feature_cache_dir) if feature_cache_dir else None
+        self.cache_tag = str(cache_tag) if cache_tag else "default"
         self.to_db = T.AmplitudeToDB()
         self.time_mask = T.TimeMasking(time_mask_param=time_mask_param)
         self.freq_mask = T.FrequencyMasking(freq_mask_param=freq_mask_param)
@@ -107,14 +111,22 @@ class SpeechEmotionDataset(Dataset):
             df["clip_id"].tolist(),
             df["label"].astype(int).tolist()
         ))
+        if self.feature_cache_dir is not None:
+            self.feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
     def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx):
-        clip_id, label = self.samples[idx]
-        wav_path = self.audio_dir / f"{clip_id}.wav"
+    def _cache_path_for(self, clip_id: str) -> Path | None:
+        if self.feature_cache_dir is None:
+            return None
+        # Features with speed perturbation are stochastic and should not be cached.
+        if self.speed_perturb_prob > 0.0:
+            return None
+        cache_key = hashlib.sha1(f"{clip_id}|{self.cache_tag}".encode("utf-8")).hexdigest()
+        return self.feature_cache_dir / f"{cache_key}.pt"
 
+    def _build_feature_tensor(self, wav_path: Path) -> torch.Tensor:
         try:
             import soundfile as sf
 
@@ -171,6 +183,19 @@ class SpeechEmotionDataset(Dataset):
             delta = AF.compute_deltas(spec)
             delta2 = AF.compute_deltas(delta)
             spec = torch.cat([spec, delta, delta2], dim=0)
+        return spec
+
+    def __getitem__(self, idx):
+        clip_id, label = self.samples[idx]
+        wav_path = self.audio_dir / f"{clip_id}.wav"
+        cache_path = self._cache_path_for(clip_id)
+        spec = None
+        if cache_path is not None and cache_path.exists():
+            spec = torch.load(cache_path, map_location="cpu")
+        if spec is None:
+            spec = self._build_feature_tensor(wav_path)
+            if cache_path is not None:
+                torch.save(spec, cache_path)
 
         # Normalise
         if self.mean is not None and self.std is not None:
@@ -207,7 +232,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
                     num_time_masks=2, time_mask_param=24,
                     num_freq_masks=2, freq_mask_param=8,
                     feature_type="mel", n_features=None,
-                    speed_perturb_prob=0.0, speed_perturb_min=0.9, speed_perturb_max=1.1):
+                    speed_perturb_prob=0.0, speed_perturb_min=0.9, speed_perturb_max=1.1,
+                    feature_cache_dir=None):
     """Build DataLoaders for train, validation, and test splits.
 
     The training set is split into train and validation subsets using
@@ -253,6 +279,13 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     else:
         raise ValueError(f"Unsupported feature_type: {feature_type}")
 
+    cache_root = Path(feature_cache_dir) if feature_cache_dir else None
+    cache_tag = (
+        f"{feature_type}_{n_features}_frames{max_frames}_"
+        f"{'deltas' if include_deltas else 'nodeltas'}_"
+        f"{'db' if apply_db else 'lin'}"
+    )
+
     # Build full training dataset (no normalisation yet) to compute stats
     full_train_raw = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
@@ -261,6 +294,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         max_frames = max_frames,
         include_deltas = include_deltas,
         apply_db = apply_db,
+        feature_cache_dir = cache_root / "train_raw" if cache_root else None,
+        cache_tag = cache_tag,
     )
 
     # Stratified train / validation split for stable validation signal
@@ -302,6 +337,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         speed_perturb_prob = speed_perturb_prob,
         speed_perturb_min = speed_perturb_min,
         speed_perturb_max = speed_perturb_max,
+        feature_cache_dir = cache_root / "train_aug" if cache_root else None,
+        cache_tag = cache_tag,
     )
     val_dataset = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
@@ -312,6 +349,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         std        = std,
         include_deltas = include_deltas,
         apply_db = apply_db,
+        feature_cache_dir = cache_root / "train_val" if cache_root else None,
+        cache_tag = cache_tag,
     )
     train_final = Subset(train_dataset, train_indices)
     val_final = Subset(val_dataset, val_indices)
@@ -325,19 +364,26 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         std        = std,
         include_deltas = include_deltas,
         apply_db = apply_db,
+        feature_cache_dir = cache_root / "test" if cache_root else None,
+        cache_tag = cache_tag,
     )
 
+    pin_memory = torch.cuda.is_available()
+    persistent_workers = num_workers > 0
     train_loader = DataLoader(
         train_final, batch_size=batch_size,
-        shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True,
+        shuffle=True, num_workers=num_workers, pin_memory=pin_memory, drop_last=True,
+        persistent_workers=persistent_workers,
     )
     val_loader = DataLoader(
         val_final, batch_size=batch_size,
-        shuffle=False, num_workers=num_workers, pin_memory=True,
+        shuffle=False, num_workers=num_workers, pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
     )
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size,
-        shuffle=False, num_workers=num_workers, pin_memory=True,
+        shuffle=False, num_workers=num_workers, pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
     )
 
     print(f"\nDataset split:")
@@ -360,5 +406,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
             "Speed perturbation (train only): "
             f"prob={speed_perturb_prob:.2f}, range=[{speed_perturb_min:.2f}, {speed_perturb_max:.2f}]"
         )
+    if cache_root is not None:
+        print(f"Feature cache: {cache_root}")
 
     return train_loader, val_loader, test_loader, mean, std
