@@ -125,6 +125,7 @@ def save_submission(team_name, clip_ids, preds, results_dir):
     The leaderboard script computes the score server-side from this CSV
     against the ground truth — no self-reported scores.
     """
+    results_dir.mkdir(parents=True, exist_ok=True)
     filename = results_dir / (team_name.replace(" ", "_") + ".csv")
     with open(filename, "w", newline="") as f:
         writer = csv.writer(f)
@@ -141,6 +142,15 @@ def main(args):
     results_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     model_path  = results_dir / "best_model.pt"
     stats_path  = results_dir / "norm_stats.pt"
+    # Submission-friendly fallback: allow root-level artifacts.
+    if not model_path.exists():
+        fallback_model = Path("best_model.pt")
+        if fallback_model.exists():
+            model_path = fallback_model
+    if not stats_path.exists():
+        fallback_stats = Path("norm_stats.pt")
+        if fallback_stats.exists():
+            stats_path = fallback_stats
 
     print(f"Device: {device}")
 
