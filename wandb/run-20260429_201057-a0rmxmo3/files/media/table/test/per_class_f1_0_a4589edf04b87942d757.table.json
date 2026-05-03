@@ -1,1 +1,0 @@
-{"columns": ["emotion", "f1_score"], "data": [["anger", 0.6361], ["disgust", 0.2922], ["fear", 0.2819], ["happy", 0.3893], ["neutral", 0.5405], ["sad", 0.5614]]}

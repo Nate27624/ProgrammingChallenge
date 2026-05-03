@@ -217,10 +217,20 @@ def compute_mean_std(dataset):
     Returns tensors of shape (channels, n_mels, 1) suitable for broadcasting.
     """
     print("Computing normalisation statistics from training set...")
-    all_specs = [dataset[i][0] for i in range(len(dataset))]
-    stacked   = torch.stack(all_specs, dim=0)          # (N, C, n_mels, T)
-    mean      = stacked.mean(dim=(0, 3), keepdim=True).squeeze(0)   # (C, n_mels, 1)
-    std       = stacked.std(dim=(0, 3),  keepdim=True).squeeze(0)   # (C, n_mels, 1)
+    n_frames_total = 0
+    channel_sum = 0.0
+    channel_sum_sq = 0.0
+    
+    for i in range(len(dataset)):
+        spec = dataset[i][0]
+        channel_sum += spec.sum(dim=-1)
+        channel_sum_sq += (spec ** 2).sum(dim=-1)
+        n_frames_total += spec.shape[-1]
+
+    mean = (channel_sum / n_frames_total).unsqueeze(-1)
+    var = (channel_sum_sq / n_frames_total) - (mean.squeeze(-1) ** 2)
+    std = torch.sqrt(torch.clamp(var, min=1e-8)).unsqueeze(-1)
+    
     print(f"  Done. Mean range: [{mean.min().item():.2f}, {mean.max().item():.2f}]")
     return mean, std
 

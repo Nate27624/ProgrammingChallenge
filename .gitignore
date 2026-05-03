@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch and Machine Learning
+*.pt
+*.pth
+*.ckpt
+
+# Logs
+*.log
+error.log
+
+# Project specific directories
+results/
+dataset/
+wandb/
+
+# Virtual Environments
+venv/
+.env
