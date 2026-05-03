@@ -25,6 +25,34 @@ from typing import Any
 
 
 WEIGHTED_F1_RE = re.compile(r"Weighted F1:\s*([0-9]*\.?[0-9]+)")
+EPOCH_LINE_RE = re.compile(r"^Epoch\s+\d+/\d+")
+
+
+def should_echo_train_line(line: str) -> bool:
+    line = line.strip()
+    if not line:
+        return False
+    if EPOCH_LINE_RE.match(line):
+        return True
+    key_prefixes = (
+        "Device:",
+        "Loading data",
+        "Dataset split:",
+        "Feature shape:",
+        "Feature cache:",
+        "SpecAugment mode:",
+        "Model:",
+        "Trainable parameters:",
+        "Training for up to",
+        "Early stopping triggered",
+        "Best model saved to",
+        "Norm stats saved to",
+    )
+    if any(line.startswith(p) for p in key_prefixes):
+        return True
+    if "--> New best model saved" in line:
+        return True
+    return False
 
 
 def parse_seeds(raw: str) -> list[int]:
@@ -57,7 +85,10 @@ def run_cmd(cmd: list[str], capture: bool = False, env: dict[str, str] | None = 
 
 
 def run_cmd_live_capture(
-    cmd: list[str], log_path: Path | None = None, env: dict[str, str] | None = None
+    cmd: list[str],
+    log_path: Path | None = None,
+    env: dict[str, str] | None = None,
+    full_output: bool = False,
 ) -> tuple[int, str]:
     run_env = os.environ.copy()
     if env:
@@ -77,7 +108,8 @@ def run_cmd_live_capture(
     with (log_path.open("w", encoding="utf-8") if log_path else open(os.devnull, "w")) as fh:
         assert proc.stdout is not None
         for line in proc.stdout:
-            sys.stdout.write(line)
+            if full_output or should_echo_train_line(line):
+                sys.stdout.write(line)
             out_lines.append(line)
             if log_path:
                 fh.write(line)
@@ -230,6 +262,11 @@ def main() -> None:
         action="store_true",
         help="Set WANDB_MODE=offline for train/test subprocesses.",
     )
+    parser.add_argument(
+        "--full_train_output",
+        action="store_true",
+        help="Print all train.py subprocess lines instead of concise filtered output.",
+    )
     args = parser.parse_args()
 
     seeds = parse_seeds(args.seeds)
@@ -289,7 +326,12 @@ def main() -> None:
 
             t0 = time.time()
             train_log_path = summary_dir / f"{run_name}_e{epoch_cap}_train.log"
-            train_rc, _ = run_cmd_live_capture(train_cmd, log_path=train_log_path, env=subproc_env)
+            train_rc, _ = run_cmd_live_capture(
+                train_cmd,
+                log_path=train_log_path,
+                env=subproc_env,
+                full_output=args.full_train_output,
+            )
             train_sec = time.time() - t0
             model_exists = (run_dir / "best_model.pt").exists()
             if train_rc != 0:
@@ -386,6 +428,13 @@ def main() -> None:
                 row["global_best_so_far"] = global_best
 
             rows.append(row)
+
+            seed_best_str = f"{seed_best:.4f}" if seed_best > -1e20 else "n/a"
+            global_best_str = f"{global_best:.4f}" if global_best > -1e20 else "n/a"
+            print(
+                f"    status seed_best={seed_best_str} global_best={global_best_str} "
+                f"train_sec={train_sec:.1f}s test_sec={test_sec:.1f}s"
+            )
 
             cutoff_allowed = epoch_cap >= args.min_epoch_for_cutoff
             if (not args.disable_stale_cutoff) and cutoff_allowed and stale >= args.stale_checks:
