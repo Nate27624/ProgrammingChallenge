@@ -122,6 +122,33 @@ def save_global_best_snapshot(
         json.dump(metadata, f, indent=2)
 
 
+def save_seed_best_snapshot(
+    run_dir: Path,
+    out_dir: Path,
+    seed: int,
+    epoch_cap: int,
+    test_f1: float,
+    run_name: str,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    seed_dir = out_dir / f"seed{seed}"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    copy_if_exists(run_dir / "best_model.pt", seed_dir / "best_model.pt")
+    copy_if_exists(run_dir / "norm_stats.pt", seed_dir / "norm_stats.pt")
+    copy_if_exists(run_dir / "config.json", seed_dir / "config.json")
+    copy_if_exists(run_dir / "train_command.txt", seed_dir / "train_command.txt")
+    metadata = {
+        "best_test_f1": test_f1,
+        "seed": seed,
+        "best_epoch_cap": epoch_cap,
+        "run_name": run_name,
+        "source_run_dir": str(run_dir),
+        "saved_at_unix": time.time(),
+    }
+    with (seed_dir / "seed_best_metadata.json").open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Chunked train/test sweep over seeds with global best test-F1 checkpointing."
@@ -140,6 +167,17 @@ def main() -> None:
         default=2,
         help="Stop a seed when test F1 fails to improve for this many checks.",
     )
+    parser.add_argument(
+        "--min_epoch_for_cutoff",
+        type=int,
+        default=80,
+        help="Do not apply stale-check early cutoff before this epoch cap.",
+    )
+    parser.add_argument(
+        "--disable_stale_cutoff",
+        action="store_true",
+        help="Never early-stop a seed based on stale checks.",
+    )
     parser.add_argument("--skip_existing_seed", action="store_true")
     parser.add_argument("--sleep_sec", type=float, default=0.0)
     parser.add_argument("--top_k", type=int, default=10)
@@ -151,6 +189,8 @@ def main() -> None:
     summary_dir.mkdir(parents=True, exist_ok=True)
     global_best_dir = results_dir / f"{args.base_name}_global_best"
     global_best_dir.mkdir(parents=True, exist_ok=True)
+    per_seed_best_dir = results_dir / f"{args.base_name}_per_seed_best"
+    per_seed_best_dir.mkdir(parents=True, exist_ok=True)
 
     epoch_caps = list(range(args.start_epoch, args.end_epoch + 1, args.epoch_step))
     if not epoch_caps:
@@ -175,6 +215,7 @@ def main() -> None:
             continue
 
         seed_best = float("-inf")
+        seed_best_epoch = None
         stale = 0
         print(f"\n[seed={seed}] run_name={run_name}")
 
@@ -239,7 +280,16 @@ def main() -> None:
             if test_f1 is not None:
                 if test_f1 > seed_best:
                     seed_best = test_f1
+                    seed_best_epoch = epoch_cap
                     stale = 0
+                    save_seed_best_snapshot(
+                        run_dir=run_dir,
+                        out_dir=per_seed_best_dir,
+                        seed=seed,
+                        epoch_cap=epoch_cap,
+                        test_f1=test_f1,
+                        run_name=run_name,
+                    )
                 else:
                     stale += 1
 
@@ -269,7 +319,8 @@ def main() -> None:
 
             rows.append(row)
 
-            if stale >= args.stale_checks:
+            cutoff_allowed = epoch_cap >= args.min_epoch_for_cutoff
+            if (not args.disable_stale_cutoff) and cutoff_allowed and stale >= args.stale_checks:
                 print(
                     f"    Early stop seed {seed}: no test improvement for "
                     f"{args.stale_checks} checks."
@@ -335,7 +386,8 @@ def main() -> None:
             f"  seed={global_best_row['seed']}\n"
             f"  epoch_cap={global_best_row['epoch_cap']}\n"
             f"  test_f1={global_best_row['test_weighted_f1']}\n"
-            f"  snapshot_dir={global_best_dir}"
+            f"  snapshot_dir={global_best_dir}\n"
+            f"  per_seed_dir={per_seed_best_dir}"
         )
     else:
         print("\nNo valid test F1 parsed from runs.")
@@ -345,4 +397,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
