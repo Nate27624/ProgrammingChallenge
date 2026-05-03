@@ -1,11 +1,12 @@
 """
 model.py
 ========
-CNN + Bidirectional Mamba model for speech emotion recognition.
+SER model zoo: baseline-ready Mamba/CNN-BiLSTM variants plus a quick TF-Mamba.
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from dataloader import EMOTION_LABELS
 
 
@@ -385,6 +386,168 @@ class CNNBiLSTMAttentionSER(nn.Module):
         x, _ = self.lstm(x)
         x = self.attn(x)
         return self.head(x)
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+def _pick_attention_heads(d_model: int) -> int:
+    for h in (8, 4, 2, 1):
+        if d_model % h == 0:
+            return h
+    return 1
+
+
+class TemporalFrequencyMambaSER(nn.Module):
+    """
+    Quick TF-Mamba-style SER model.
+
+    This is a pragmatic approximation of the paper's core idea:
+    - temporal-aware branch
+    - frequency-filtered branch
+    - Mamba processing in both branches
+    - feature fusion + classifier
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        n_features: int = 40,
+        num_classes: int = len(EMOTION_LABELS),
+        d_model: int = 128,
+        d_state: int = 32,
+        d_conv: int = 4,
+        expand: int = 2,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+        pooling_type: str = "meanmax",
+    ):
+        super().__init__()
+        mamba_factory = _resolve_mamba_block_factory()
+        self.pooling_type = pooling_type
+
+        self.input_proj = nn.Linear(in_channels * n_features, d_model)
+        self.input_norm = nn.LayerNorm(d_model)
+        n_heads = _pick_attention_heads(d_model)
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=n_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.ffn_norm = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 2, d_model),
+        )
+        self.dropout = nn.Dropout(dropout)
+
+        # Temporal-aware module: depthwise Conv1D over token sequence.
+        self.temporal_conv = nn.Conv1d(
+            d_model,
+            d_model,
+            kernel_size=3,
+            padding=1,
+            groups=d_model,
+            bias=False,
+        )
+
+        self.temporal_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+        self.temporal_blocks = nn.ModuleList(
+            [mamba_factory(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand) for _ in range(num_layers)]
+        )
+
+        self.freq_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+        self.freq_blocks = nn.ModuleList(
+            [mamba_factory(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand) for _ in range(num_layers)]
+        )
+
+        # Learnable low-pass threshold and sharpness for adaptive frequency filtering.
+        self.freq_cutoff_logit = nn.Parameter(torch.tensor(0.0))
+        self.freq_sharpness = nn.Parameter(torch.tensor(6.0))
+
+        self.fusion = nn.Linear(d_model * 2, d_model)
+        self.fusion_norm = nn.LayerNorm(d_model)
+
+        if pooling_type == "attention":
+            self.attn_pool = nn.Linear(d_model, 1)
+            pooled_dim = d_model
+        elif pooling_type == "meanmax":
+            self.attn_pool = None
+            pooled_dim = d_model * 2
+        else:
+            raise ValueError(f"Unsupported pooling_type: {pooling_type}")
+
+        self.classifier = nn.Sequential(
+            nn.Linear(pooled_dim, d_model * 2),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 2, num_classes),
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def _run_stack(self, x: torch.Tensor, norms: nn.ModuleList, blocks: nn.ModuleList) -> torch.Tensor:
+        for norm, block in zip(norms, blocks):
+            x = x + self.dropout(block(norm(x)))
+        return x
+
+    def _frequency_filter(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, D), FFT across token/time axis to capture global frequency envelope.
+        spec = torch.fft.rfft(x, dim=1, norm="ortho")
+        n_bins = spec.size(1)
+        idx = torch.arange(n_bins, device=x.device, dtype=x.dtype).view(1, n_bins, 1)
+
+        cutoff = torch.sigmoid(self.freq_cutoff_logit) * max(1, n_bins - 1)
+        sharpness = F.softplus(self.freq_sharpness) + 1.0
+        low_pass = torch.sigmoid((cutoff - idx) * sharpness)
+
+        power = spec.abs().pow(2)
+        power_norm = power / (power.mean(dim=1, keepdim=True) + 1e-6)
+        adaptive = torch.sigmoid((power_norm - 1.0) * 2.0)
+
+        spec_f = spec * low_pass * adaptive
+        return torch.fft.irfft(spec_f, n=x.size(1), dim=1, norm="ortho")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, F, T)
+        bsz, channels, freq_bins, time_steps = x.shape
+        seq = x.permute(0, 3, 1, 2).contiguous().view(bsz, time_steps, channels * freq_bins)
+        seq = self.input_proj(seq)
+
+        # Shallow self-attention encoder.
+        attn_in = self.input_norm(seq)
+        attn_out, _ = self.self_attn(attn_in, attn_in, attn_in, need_weights=False)
+        seq = seq + self.dropout(attn_out)
+        seq = seq + self.dropout(self.ffn(self.ffn_norm(seq)))
+
+        # Temporal branch.
+        temporal = seq + self.temporal_conv(seq.transpose(1, 2)).transpose(1, 2)
+        temporal = self._run_stack(temporal, self.temporal_norms, self.temporal_blocks)
+
+        # Frequency branch.
+        frequency = self._frequency_filter(seq)
+        frequency = self._run_stack(frequency, self.freq_norms, self.freq_blocks)
+
+        fused = seq + self.fusion(torch.cat([temporal, frequency], dim=-1))
+        fused = self.fusion_norm(fused)
+
+        if self.pooling_type == "attention":
+            attn_logits = self.attn_pool(fused).squeeze(-1)
+            attn = torch.softmax(attn_logits, dim=1).unsqueeze(-1)
+            pooled = (fused * attn).sum(dim=1)
+        else:
+            pooled = torch.cat([fused.mean(dim=1), fused.max(dim=1).values], dim=1)
+
+        return self.classifier(pooled)
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

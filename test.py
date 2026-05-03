@@ -38,7 +38,7 @@ from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
                         SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
 from baseline import BaselineLSTM
-from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER, TemporalFrequencyMambaSER
 from wandb_compat import wandb
 
 
@@ -213,6 +213,18 @@ def main(args):
             dropout=float(model_config.get("dropout", 0.2)),
             frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
             fusion_type=str(model_config.get("fusion_type", "concat")),
+            pooling_type=str(model_config.get("pooling_type", "meanmax")),
+        ).to(device)
+    elif model_name == "tf_mamba":
+        model = TemporalFrequencyMambaSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            d_model=int(model_config.get("mamba_d_model", 128)),
+            d_state=int(model_config.get("mamba_d_state", 32)),
+            d_conv=int(model_config.get("mamba_d_conv", 4)),
+            expand=int(model_config.get("mamba_expand", 2)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.2)),
             pooling_type=str(model_config.get("pooling_type", "meanmax")),
         ).to(device)
     elif model_name == "bilstm_attention":
