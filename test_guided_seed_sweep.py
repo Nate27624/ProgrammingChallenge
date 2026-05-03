@@ -13,10 +13,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -43,12 +45,44 @@ def parse_test_f1(stdout: str) -> float | None:
     return float(m.group(1))
 
 
-def run_cmd(cmd: list[str], capture: bool = False) -> tuple[int, str]:
+def run_cmd(cmd: list[str], capture: bool = False, env: dict[str, str] | None = None) -> tuple[int, str]:
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
     if capture:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=run_env)
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-    proc = subprocess.run(cmd)
+    proc = subprocess.run(cmd, env=run_env)
     return proc.returncode, ""
+
+
+def run_cmd_live_capture(
+    cmd: list[str], log_path: Path | None = None, env: dict[str, str] | None = None
+) -> tuple[int, str]:
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+        universal_newlines=True,
+        env=run_env,
+    )
+    out_lines: list[str] = []
+    with (log_path.open("w", encoding="utf-8") if log_path else open(os.devnull, "w")) as fh:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            out_lines.append(line)
+            if log_path:
+                fh.write(line)
+    rc = proc.wait()
+    return rc, "".join(out_lines)
 
 
 def build_train_cmd(
@@ -181,6 +215,21 @@ def main() -> None:
     parser.add_argument("--skip_existing_seed", action="store_true")
     parser.add_argument("--sleep_sec", type=float, default=0.0)
     parser.add_argument("--top_k", type=int, default=10)
+    parser.add_argument(
+        "--allow_nonzero_train_rc_if_model_exists",
+        action="store_true",
+        help="If train returns non-zero but best_model.pt exists, continue to test anyway.",
+    )
+    parser.add_argument(
+        "--disable_wandb_in_subprocess",
+        action="store_true",
+        help="Set WANDB_MODE=disabled for train/test subprocesses.",
+    )
+    parser.add_argument(
+        "--force_wandb_offline_in_subprocess",
+        action="store_true",
+        help="Set WANDB_MODE=offline for train/test subprocesses.",
+    )
     args = parser.parse_args()
 
     seeds = parse_seeds(args.seeds)
@@ -199,6 +248,11 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     global_best = float("-inf")
     global_best_row: dict[str, Any] | None = None
+    subproc_env: dict[str, str] = {}
+    if args.disable_wandb_in_subprocess:
+        subproc_env["WANDB_MODE"] = "disabled"
+    elif args.force_wandb_offline_in_subprocess:
+        subproc_env["WANDB_MODE"] = "offline"
 
     total_jobs = len(seeds) * len(epoch_caps)
     job_idx = 0
@@ -234,35 +288,49 @@ def main() -> None:
             print(f"    train: {train_cmd_str}")
 
             t0 = time.time()
-            train_rc, _ = run_cmd(train_cmd, capture=False)
+            train_log_path = summary_dir / f"{run_name}_e{epoch_cap}_train.log"
+            train_rc, _ = run_cmd_live_capture(train_cmd, log_path=train_log_path, env=subproc_env)
             train_sec = time.time() - t0
+            model_exists = (run_dir / "best_model.pt").exists()
             if train_rc != 0:
-                print(f"    train failed rc={train_rc}, stopping this seed.")
-                rows.append(
-                    {
-                        "seed": seed,
-                        "run_name": run_name,
-                        "epoch_cap": epoch_cap,
-                        "train_return_code": train_rc,
-                        "train_sec": train_sec,
-                        "test_return_code": None,
-                        "test_sec": None,
-                        "test_weighted_f1": None,
-                        "seed_best_so_far": seed_best if seed_best > -1e20 else None,
-                        "global_best_so_far": global_best if global_best > -1e20 else None,
-                    }
-                )
-                break
+                if args.allow_nonzero_train_rc_if_model_exists and model_exists:
+                    print(
+                        f"    train returned rc={train_rc}, but best_model.pt exists; "
+                        "continuing to test."
+                    )
+                else:
+                    print(
+                        f"    train failed rc={train_rc}, stopping this seed. "
+                        f"(model_exists={model_exists})"
+                    )
+                    rows.append(
+                        {
+                            "seed": seed,
+                            "run_name": run_name,
+                            "epoch_cap": epoch_cap,
+                            "train_return_code": train_rc,
+                            "train_sec": train_sec,
+                            "test_return_code": None,
+                            "test_sec": None,
+                            "test_weighted_f1": None,
+                            "seed_best_so_far": seed_best if seed_best > -1e20 else None,
+                            "global_best_so_far": global_best if global_best > -1e20 else None,
+                        }
+                    )
+                    break
 
             test_cmd = build_test_cmd(args.test_cmd, run_name=run_name, results_dir=results_dir)
             test_cmd_str = " ".join(shlex.quote(c) for c in test_cmd)
             print(f"    test : {test_cmd_str}")
 
             t1 = time.time()
-            test_rc, test_out = run_cmd(test_cmd, capture=True)
+            test_rc, test_out = run_cmd(test_cmd, capture=True, env=subproc_env)
             test_sec = time.time() - t1
             test_f1 = parse_test_f1(test_out)
             print(f"    test rc={test_rc} f1={test_f1}")
+            test_log_path = summary_dir / f"{run_name}_e{epoch_cap}_test.log"
+            with test_log_path.open("w", encoding="utf-8") as f:
+                f.write(test_out)
 
             row = {
                 "seed": seed,
