@@ -1,0 +1,37 @@
+python train.py \
+  --data_dir dataset \
+  --results_dir results \
+  --team_name bilstm_cache_robust_s42_best \
+  --run_name bilstm_cache_robust_s42_best \
+  --model_name bilstm_attention \
+  --feature_type mfcc \
+  --include_deltas \
+  --specaugment \
+  --specaugment_on_gpu \
+  --cnn_channels 48 \
+  --num_layers 3 \
+  --dropout 0.3068276822365896 \
+  --learning_rate 0.0009510151347177117 \
+  --weight_decay 0.00022929944644652949 \
+  --max_grad_norm 1.923827803784039 \
+  --mixup_alpha 0.3090273456808727 \
+  --mixup_prob 0.49867732635361434 \
+  --loss_type ce \
+  --focal_gamma 2.0 \
+  --no_class_weighting \
+  --label_smoothing 0.058542593848961544 \
+  --scheduler_type warmup_cosine \
+  --warmup_epochs 5 \
+  --min_lr_ratio 0.051128928860341774 \
+  --batch_size 32 \
+  --num_time_masks 2 \
+  --time_mask_param 48 \
+  --num_freq_masks 4 \
+  --freq_mask_param 10 \
+  --speed_perturb_prob 0.19340210558042564 \
+  --speed_perturb_min 0.9 \
+  --speed_perturb_max 1.1 \
+  --num_workers 0 \
+  --seed 42 \
+  --feature_cache_dir results/_feature_cache \
+  --hidden_size 320

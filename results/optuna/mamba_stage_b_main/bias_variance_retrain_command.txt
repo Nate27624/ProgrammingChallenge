@@ -1,0 +1,27 @@
+python train.py \
+  --data_dir dataset \
+  --results_dir results \
+  --team_name mamba_stage_b_main_bv_best \
+  --run_name mamba_stage_b_main_bv_best \
+  --model_name mamba \
+  --feature_type mfcc \
+  --include_deltas \
+  --specaugment \
+  --mamba_d_model 128 \
+  --cnn_channels 64 \
+  --mamba_d_state 32 \
+  --num_layers 2 \
+  --mamba_expand 4 \
+  --mamba_d_conv 3 \
+  --frontend_type basic_cnn \
+  --fusion_type gated \
+  --pooling_type meanmax \
+  --dropout 0.38808882692141133 \
+  --learning_rate 0.0009965129364910847 \
+  --weight_decay 4.033328929925517e-05 \
+  --label_smoothing 0.056385235347159994 \
+  --batch_size 32 \
+  --num_time_masks 3 \
+  --time_mask_param 28 \
+  --num_freq_masks 2 \
+  --freq_mask_param 6
