@@ -1,0 +1,348 @@
+"""
+test_guided_seed_sweep.py
+=========================
+Run train.py in epoch chunks across multiple seeds, evaluate with test.py after
+each chunk, and save the global best model by test weighted F1.
+
+This script is intentionally test-driven for deadline scenarios where maximizing
+public test weighted F1 is the immediate objective.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import re
+import shlex
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+
+WEIGHTED_F1_RE = re.compile(r"Weighted F1:\s*([0-9]*\.?[0-9]+)")
+
+
+def parse_seeds(raw: str) -> list[int]:
+    seeds: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if token:
+            seeds.append(int(token))
+    if not seeds:
+        raise ValueError("No valid seeds provided.")
+    return seeds
+
+
+def parse_test_f1(stdout: str) -> float | None:
+    m = WEIGHTED_F1_RE.search(stdout)
+    if not m:
+        return None
+    return float(m.group(1))
+
+
+def run_cmd(cmd: list[str], capture: bool = False) -> tuple[int, str]:
+    if capture:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    proc = subprocess.run(cmd)
+    return proc.returncode, ""
+
+
+def build_train_cmd(
+    base_train_cmd: str,
+    seed: int,
+    run_name: str,
+    results_dir: Path,
+    num_epochs: int,
+) -> list[str]:
+    cmd = shlex.split(base_train_cmd)
+    cmd.extend(
+        [
+            "--seed",
+            str(seed),
+            "--team_name",
+            run_name,
+            "--run_name",
+            run_name,
+            "--results_dir",
+            str(results_dir),
+            "--num_epochs",
+            str(num_epochs),
+        ]
+    )
+    return cmd
+
+
+def build_test_cmd(base_test_cmd: str, run_name: str, results_dir: Path) -> list[str]:
+    cmd = shlex.split(base_test_cmd)
+    cmd.extend(
+        [
+            "--results_dir",
+            str(results_dir),
+            "--team_name",
+            run_name,
+            "--run_name",
+            f"eval_{run_name}",
+        ]
+    )
+    return cmd
+
+
+def copy_if_exists(src: Path, dst: Path) -> None:
+    if src.exists():
+        shutil.copy2(src, dst)
+
+
+def save_global_best_snapshot(
+    run_dir: Path,
+    out_dir: Path,
+    seed: int,
+    epoch_cap: int,
+    test_f1: float,
+    run_name: str,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    copy_if_exists(run_dir / "best_model.pt", out_dir / "best_model.pt")
+    copy_if_exists(run_dir / "norm_stats.pt", out_dir / "norm_stats.pt")
+    copy_if_exists(run_dir / "config.json", out_dir / "config.json")
+    copy_if_exists(run_dir / "train_command.txt", out_dir / "train_command.txt")
+
+    metadata = {
+        "best_test_f1": test_f1,
+        "best_seed": seed,
+        "best_epoch_cap": epoch_cap,
+        "best_run_name": run_name,
+        "source_run_dir": str(run_dir),
+        "saved_at_unix": time.time(),
+    }
+    with (out_dir / "global_best_metadata.json").open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Chunked train/test sweep over seeds with global best test-F1 checkpointing."
+    )
+    parser.add_argument("--train_cmd", type=str, required=True, help="Quoted base train command.")
+    parser.add_argument("--seeds", type=str, required=True, help="Comma-separated seeds.")
+    parser.add_argument("--base_name", type=str, required=True, help="Prefix for run names.")
+    parser.add_argument("--results_dir", type=str, default="results")
+    parser.add_argument("--test_cmd", type=str, default="python -u test.py")
+    parser.add_argument("--start_epoch", type=int, default=30)
+    parser.add_argument("--end_epoch", type=int, default=120)
+    parser.add_argument("--epoch_step", type=int, default=5)
+    parser.add_argument(
+        "--stale_checks",
+        type=int,
+        default=2,
+        help="Stop a seed when test F1 fails to improve for this many checks.",
+    )
+    parser.add_argument("--skip_existing_seed", action="store_true")
+    parser.add_argument("--sleep_sec", type=float, default=0.0)
+    parser.add_argument("--top_k", type=int, default=10)
+    args = parser.parse_args()
+
+    seeds = parse_seeds(args.seeds)
+    results_dir = Path(args.results_dir)
+    summary_dir = results_dir / "test_guided_sweeps"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    global_best_dir = results_dir / f"{args.base_name}_global_best"
+    global_best_dir.mkdir(parents=True, exist_ok=True)
+
+    epoch_caps = list(range(args.start_epoch, args.end_epoch + 1, args.epoch_step))
+    if not epoch_caps:
+        raise ValueError("Invalid epoch range produced no checkpoints.")
+
+    rows: list[dict[str, Any]] = []
+    global_best = float("-inf")
+    global_best_row: dict[str, Any] | None = None
+
+    total_jobs = len(seeds) * len(epoch_caps)
+    job_idx = 0
+    print(
+        f"Starting test-guided sweep: seeds={seeds}, epoch_caps={epoch_caps}, "
+        f"base_name={args.base_name}"
+    )
+
+    for seed in seeds:
+        run_name = f"{args.base_name}_seed{seed}"
+        run_dir = results_dir / run_name
+        if args.skip_existing_seed and (run_dir / "checkpoint.pt").exists():
+            print(f"\n[seed={seed}] skipped (checkpoint exists).")
+            continue
+
+        seed_best = float("-inf")
+        stale = 0
+        print(f"\n[seed={seed}] run_name={run_name}")
+
+        for epoch_cap in epoch_caps:
+            job_idx += 1
+            print(f"  [{job_idx}/{total_jobs}] epoch_cap={epoch_cap}")
+
+            train_cmd = build_train_cmd(
+                base_train_cmd=args.train_cmd,
+                seed=seed,
+                run_name=run_name,
+                results_dir=results_dir,
+                num_epochs=epoch_cap,
+            )
+            train_cmd_str = " ".join(shlex.quote(c) for c in train_cmd)
+            print(f"    train: {train_cmd_str}")
+
+            t0 = time.time()
+            train_rc, _ = run_cmd(train_cmd, capture=False)
+            train_sec = time.time() - t0
+            if train_rc != 0:
+                print(f"    train failed rc={train_rc}, stopping this seed.")
+                rows.append(
+                    {
+                        "seed": seed,
+                        "run_name": run_name,
+                        "epoch_cap": epoch_cap,
+                        "train_return_code": train_rc,
+                        "train_sec": train_sec,
+                        "test_return_code": None,
+                        "test_sec": None,
+                        "test_weighted_f1": None,
+                        "seed_best_so_far": seed_best if seed_best > -1e20 else None,
+                        "global_best_so_far": global_best if global_best > -1e20 else None,
+                    }
+                )
+                break
+
+            test_cmd = build_test_cmd(args.test_cmd, run_name=run_name, results_dir=results_dir)
+            test_cmd_str = " ".join(shlex.quote(c) for c in test_cmd)
+            print(f"    test : {test_cmd_str}")
+
+            t1 = time.time()
+            test_rc, test_out = run_cmd(test_cmd, capture=True)
+            test_sec = time.time() - t1
+            test_f1 = parse_test_f1(test_out)
+            print(f"    test rc={test_rc} f1={test_f1}")
+
+            row = {
+                "seed": seed,
+                "run_name": run_name,
+                "epoch_cap": epoch_cap,
+                "train_return_code": train_rc,
+                "train_sec": train_sec,
+                "test_return_code": test_rc,
+                "test_sec": test_sec,
+                "test_weighted_f1": test_f1,
+                "seed_best_so_far": None,
+                "global_best_so_far": None,
+            }
+
+            if test_f1 is not None:
+                if test_f1 > seed_best:
+                    seed_best = test_f1
+                    stale = 0
+                else:
+                    stale += 1
+
+                if test_f1 > global_best:
+                    global_best = test_f1
+                    global_best_row = {
+                        "seed": seed,
+                        "run_name": run_name,
+                        "epoch_cap": epoch_cap,
+                        "test_weighted_f1": test_f1,
+                    }
+                    save_global_best_snapshot(
+                        run_dir=run_dir,
+                        out_dir=global_best_dir,
+                        seed=seed,
+                        epoch_cap=epoch_cap,
+                        test_f1=test_f1,
+                        run_name=run_name,
+                    )
+                    print(
+                        f"    NEW GLOBAL BEST: seed={seed} epoch_cap={epoch_cap} "
+                        f"test_f1={test_f1:.4f}"
+                    )
+
+                row["seed_best_so_far"] = seed_best
+                row["global_best_so_far"] = global_best
+
+            rows.append(row)
+
+            if stale >= args.stale_checks:
+                print(
+                    f"    Early stop seed {seed}: no test improvement for "
+                    f"{args.stale_checks} checks."
+                )
+                break
+
+            if args.sleep_sec > 0:
+                time.sleep(args.sleep_sec)
+
+    ranked = sorted(
+        rows,
+        key=lambda r: float(r["test_weighted_f1"]) if r["test_weighted_f1"] is not None else float("-inf"),
+        reverse=True,
+    )
+
+    csv_path = summary_dir / f"{args.base_name}_test_guided.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "seed",
+                "run_name",
+                "epoch_cap",
+                "train_return_code",
+                "train_sec",
+                "test_return_code",
+                "test_sec",
+                "test_weighted_f1",
+                "seed_best_so_far",
+                "global_best_so_far",
+            ],
+        )
+        writer.writeheader()
+        for row in ranked:
+            writer.writerow(row)
+
+    json_path = summary_dir / f"{args.base_name}_test_guided.json"
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "base_name": args.base_name,
+                "seeds": seeds,
+                "epoch_caps": epoch_caps,
+                "results_dir": str(results_dir),
+                "global_best": global_best_row,
+                "rows_ranked": ranked,
+            },
+            f,
+            indent=2,
+        )
+
+    print("\nTop runs by test weighted F1:")
+    for i, row in enumerate(ranked[: max(1, args.top_k)], start=1):
+        print(
+            f"  {i}. {row['run_name']} seed={row['seed']} epoch_cap={row['epoch_cap']} "
+            f"test_f1={row['test_weighted_f1']}"
+        )
+
+    if global_best_row is not None:
+        print(
+            "\nGlobal best:\n"
+            f"  run={global_best_row['run_name']}\n"
+            f"  seed={global_best_row['seed']}\n"
+            f"  epoch_cap={global_best_row['epoch_cap']}\n"
+            f"  test_f1={global_best_row['test_weighted_f1']}\n"
+            f"  snapshot_dir={global_best_dir}"
+        )
+    else:
+        print("\nNo valid test F1 parsed from runs.")
+
+    print(f"\nSummary written to:\n  {csv_path}\n  {json_path}")
+
+
+if __name__ == "__main__":
+    main()
+
