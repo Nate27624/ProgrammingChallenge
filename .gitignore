@@ -1,0 +1,14 @@
+# Training artifacts
+results/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# local scratch
+.context/

@@ -29,7 +29,6 @@ Output:
 
 import argparse
 import csv
-import wandb
 import torch
 import torchaudio.transforms as T
 from pathlib import Path
@@ -37,8 +36,10 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 
 from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
-                        SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, MAX_FRAMES)
+                        SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
 from baseline import BaselineLSTM
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER, TemporalFrequencyMambaSER
+from wandb_compat import wandb
 
 
 # ── Inference ──────────────────────────────────────────────────────────────────
@@ -55,6 +56,75 @@ def evaluate(model, loader, device):
             all_labels.extend(labels.tolist())
 
     return all_preds, all_labels
+
+
+def evaluate_ensemble(models, loader, device):
+    """Run inference with logit averaging over multiple models."""
+    for m in models:
+        m.eval()
+    all_preds, all_labels = [], []
+
+    with torch.no_grad():
+        for specs, labels in loader:
+            specs = specs.to(device)
+            logits = None
+            for m in models:
+                cur = m(specs)
+                logits = cur if logits is None else (logits + cur)
+            logits = logits / float(len(models))
+            preds = logits.argmax(dim=1)
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.tolist())
+
+    return all_preds, all_labels
+
+
+def build_model(model_name, model_config, in_channels, n_features, device):
+    if model_name == "mamba":
+        model = BidirectionalMambaSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            cnn_channels=int(model_config.get("cnn_channels", 64)),
+            d_model=int(model_config.get("mamba_d_model", 128)),
+            d_state=int(model_config.get("mamba_d_state", 32)),
+            d_conv=int(model_config.get("mamba_d_conv", 4)),
+            expand=int(model_config.get("mamba_expand", 2)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.2)),
+            frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
+            fusion_type=str(model_config.get("fusion_type", "concat")),
+            pooling_type=str(model_config.get("pooling_type", "meanmax")),
+        ).to(device)
+    elif model_name == "tf_mamba":
+        model = TemporalFrequencyMambaSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            d_model=int(model_config.get("mamba_d_model", 128)),
+            d_state=int(model_config.get("mamba_d_state", 32)),
+            d_conv=int(model_config.get("mamba_d_conv", 4)),
+            expand=int(model_config.get("mamba_expand", 2)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.2)),
+            pooling_type=str(model_config.get("pooling_type", "meanmax")),
+        ).to(device)
+    elif model_name == "bilstm_attention":
+        model = CNNBiLSTMAttentionSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            cnn_channels=int(model_config.get("cnn_channels", 64)),
+            hidden_size=int(model_config.get("hidden_size", 256)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.3)),
+        ).to(device)
+    else:
+        input_size = n_features * in_channels
+        model = BaselineLSTM(
+            input_size=input_size,
+            hidden_size=int(model_config.get("hidden_size", 128)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.0)),
+        ).to(device)
+    return model
 
 
 # ── Reporting ──────────────────────────────────────────────────────────────────
@@ -124,6 +194,7 @@ def save_submission(team_name, clip_ids, preds, results_dir):
     The leaderboard script computes the score server-side from this CSV
     against the ground truth — no self-reported scores.
     """
+    results_dir.mkdir(parents=True, exist_ok=True)
     filename = results_dir / (team_name.replace(" ", "_") + ".csv")
     with open(filename, "w", newline="") as f:
         writer = csv.writer(f)
@@ -140,12 +211,26 @@ def main(args):
     results_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     model_path  = results_dir / "best_model.pt"
     stats_path  = results_dir / "norm_stats.pt"
+    # Submission-friendly fallback: allow root-level artifacts.
+    if not model_path.exists():
+        fallback_model = Path("best_model.pt")
+        if fallback_model.exists():
+            model_path = fallback_model
+    if not stats_path.exists():
+        fallback_stats = Path("norm_stats.pt")
+        if fallback_stats.exists():
+            stats_path = fallback_stats
 
     print(f"Device: {device}")
 
     # Load normalisation statistics saved by train.py
     stats     = torch.load(stats_path, map_location="cpu")
     mean, std = stats["mean"], stats["std"]
+    include_deltas = bool(stats.get("include_deltas", False))
+    feature_type = stats.get("feature_type", "mel")
+    n_features = int(stats.get("n_features", N_MFCC if feature_type == "mfcc" else N_MELS))
+    model_name = stats.get("model_name", "baseline")
+    model_config = stats.get("model_config", {})
 
     # Locate labels CSV inside the test directory
     test_dir  = Path(args.test_dir)
@@ -157,29 +242,63 @@ def main(args):
     print(f"Labels file    : {labels_csv.name}")
 
     # Build test DataLoader
-    mel_transform = T.MelSpectrogram(
-        sample_rate = SAMPLE_RATE,
-        n_fft       = WIN_SIZE,
-        hop_length  = HOP_SIZE,
-        n_mels      = N_MELS,
-    )
+    if feature_type == "mfcc":
+        feature_transform = T.MFCC(
+            sample_rate=SAMPLE_RATE,
+            n_mfcc=n_features,
+            melkwargs={
+                "n_fft": WIN_SIZE,
+                "hop_length": HOP_SIZE,
+                "n_mels": N_MELS,
+            },
+        )
+        apply_db = False
+    else:
+        feature_transform = T.MelSpectrogram(
+            sample_rate=SAMPLE_RATE,
+            n_fft=WIN_SIZE,
+            hop_length=HOP_SIZE,
+            n_mels=n_features,
+        )
+        apply_db = True
+
     test_dataset = SpeechEmotionDataset(
         audio_dir  = test_dir / "audio",
         labels_csv = labels_csv,
-        transform  = mel_transform,
+        transform  = feature_transform,
         max_frames = MAX_FRAMES,
         mean       = mean,
         std        = std,
+        include_deltas = include_deltas,
+        apply_db = apply_db,
     )
     test_loader = DataLoader(
         test_dataset, batch_size=64, shuffle=False, num_workers=0
     )
     print(f"Test clips     : {len(test_dataset)}")
 
-    # Load model
-    model = BaselineLSTM().to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    print(f"Model loaded from : {model_path}")
+    # Load model (single or bundled ensemble)
+    in_channels = 3 if include_deltas else 1
+    loaded_ckpt = torch.load(model_path, map_location="cpu")
+    ensemble_models = None
+    if (
+        isinstance(loaded_ckpt, dict)
+        and loaded_ckpt.get("checkpoint_type") == "ensemble_v1"
+        and isinstance(loaded_ckpt.get("members"), list)
+    ):
+        ensemble_models = []
+        for i, member in enumerate(loaded_ckpt["members"]):
+            m_name = str(member.get("model_name", "baseline"))
+            m_cfg = dict(member.get("model_config", {}))
+            m_state = member.get("state_dict")
+            m = build_model(m_name, m_cfg, in_channels, n_features, device)
+            m.load_state_dict(m_state)
+            ensemble_models.append(m)
+        print(f"Ensemble checkpoint loaded from : {model_path} ({len(ensemble_models)} members)")
+    else:
+        model = build_model(model_name, model_config, in_channels, n_features, device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        print(f"Model loaded from : {model_path}")
 
     # Initialise wandb
     run_name = args.run_name or results_dir.name
@@ -193,7 +312,10 @@ def main(args):
     )
 
     # Evaluate and log
-    preds, labels                        = evaluate(model, test_loader, device)
+    if ensemble_models is not None:
+        preds, labels = evaluate_ensemble(ensemble_models, test_loader, device)
+    else:
+        preds, labels = evaluate(model, test_loader, device)
     weighted_f1, per_class_f1, emo_names = report(preds, labels)
     log_to_wandb(preds, labels, weighted_f1, per_class_f1, emo_names)
     wandb.finish()
