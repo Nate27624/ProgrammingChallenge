@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 
 class _NoOpTable:
+    """Minimal wandb.Table stand-in used when wandb is unavailable."""
     def __init__(self, columns: List[str] | None = None):
         self.columns = columns or []
         self.rows: List[List[Any]] = []
@@ -18,12 +19,14 @@ class _NoOpTable:
 
 
 class _NoOpPlot:
+    """Subset of wandb.plot API used by this repository."""
     @staticmethod
     def confusion_matrix(**kwargs):
         return {"type": "confusion_matrix", "kwargs": kwargs}
 
 
 class _NoOpWandb:
+    """No-op wandb replacement preserving call compatibility."""
     def __init__(self):
         self.summary: Dict[str, Any] = {}
         self.plot = _NoOpPlot()
@@ -51,6 +54,7 @@ class _NoOpWandb:
 
 
 def get_wandb():
+    """Return real wandb if importable, otherwise return no-op fallback."""
     try:
         import wandb as real_wandb  # type: ignore
 

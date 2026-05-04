@@ -38,7 +38,7 @@ from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
                         SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
 from baseline import BaselineLSTM
-from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER, TemporalFrequencyMambaSER
+from model import CNNBiLSTMAttentionSER
 from wandb_compat import wandb
 
 
@@ -67,6 +67,8 @@ def evaluate_ensemble(models, loader, device):
     with torch.no_grad():
         for specs, labels in loader:
             specs = specs.to(device)
+            # Logit averaging is used instead of majority voting because it
+            # preserves confidence information from each member.
             logits_sum = None
             for model in models:
                 logits = model(specs)
@@ -79,34 +81,11 @@ def evaluate_ensemble(models, loader, device):
 
 
 def build_model(model_name, model_config, in_channels, n_features, device):
+    """Construct the exact model architecture described by saved norm_stats."""
     if model_name == "mamba":
-        model = BidirectionalMambaSER(
-            in_channels=in_channels,
-            n_features=n_features,
-            cnn_channels=int(model_config.get("cnn_channels", 64)),
-            d_model=int(model_config.get("mamba_d_model", 128)),
-            d_state=int(model_config.get("mamba_d_state", 32)),
-            d_conv=int(model_config.get("mamba_d_conv", 4)),
-            expand=int(model_config.get("mamba_expand", 2)),
-            num_layers=int(model_config.get("num_layers", 2)),
-            dropout=float(model_config.get("dropout", 0.2)),
-            frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
-            fusion_type=str(model_config.get("fusion_type", "concat")),
-            pooling_type=str(model_config.get("pooling_type", "meanmax")),
-        )
-    elif model_name == "tf_mamba":
-        model = TemporalFrequencyMambaSER(
-            in_channels=in_channels,
-            n_features=n_features,
-            d_model=int(model_config.get("mamba_d_model", 128)),
-            d_state=int(model_config.get("mamba_d_state", 32)),
-            d_conv=int(model_config.get("mamba_d_conv", 4)),
-            expand=int(model_config.get("mamba_expand", 2)),
-            num_layers=int(model_config.get("num_layers", 2)),
-            dropout=float(model_config.get("dropout", 0.2)),
-            pooling_type=str(model_config.get("pooling_type", "meanmax")),
-        )
-    elif model_name == "bilstm_attention":
+        print("Warning: mamba model metadata detected; mapping to bilstm_attention.")
+        model_name = "bilstm_attention"
+    if model_name == "bilstm_attention":
         model = CNNBiLSTMAttentionSER(
             in_channels=in_channels,
             n_features=n_features,
@@ -206,6 +185,7 @@ def save_submission(team_name, clip_ids, preds, results_dir):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main(args):
+    """Load artifacts, run evaluation, log metrics, and emit submission CSV."""
     device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     model_path  = results_dir / "best_model.pt"
@@ -279,11 +259,18 @@ def main(args):
     # Load model
     in_channels = 3 if include_deltas else 1
     ckpt = torch.load(model_path, map_location="cpu")
+    # Ensemble checkpoints contain multiple full member state dicts.
     if (
         model_name == "ensemble"
         and isinstance(ckpt, dict)
         and ckpt.get("checkpoint_type") == "ensemble_v1"
     ):
+        # ------------------------------------------------------------
+        # Ensemble path:
+        #   1) instantiate each member architecture
+        #   2) load each member state dict
+        #   3) evaluate with averaged logits
+        # ------------------------------------------------------------
         members = ckpt.get("members", [])
         ensemble_models = []
         for member in members:
@@ -300,6 +287,10 @@ def main(args):
         print(f"Ensemble loaded from : {model_path} (members={len(ensemble_models)})")
         preds, labels = evaluate_ensemble(ensemble_models, test_loader, device)
     else:
+        # Standard single-model checkpoint path.
+        # Supports both:
+        #   - raw state_dict checkpoints
+        #   - wrapped dict checkpoints containing `state_dict`
         model = build_model(model_name, model_config, in_channels, n_features, device)
         if isinstance(ckpt, dict) and "state_dict" in ckpt and "checkpoint_type" in ckpt:
             model.load_state_dict(ckpt["state_dict"])

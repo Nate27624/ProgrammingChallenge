@@ -5,6 +5,11 @@ Lightweight K-fold driver for train.py.
 
 Runs train.py for each fold (stratified K-fold mode) and reports aggregate
 validation weighted F1 statistics from saved checkpoints.
+
+Design goals:
+  - Keep CV logic out of train.py hot path.
+  - Preserve one run directory per fold (easy debugging/restarts).
+  - Emit machine-readable summaries for later ranking/ensembling.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import torch
 
 
 def run_cmd(cmd: list[str], env: dict[str, str] | None = None) -> int:
+    """Run one command with optional env overrides and return exit code."""
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
@@ -31,6 +37,7 @@ def run_cmd(cmd: list[str], env: dict[str, str] | None = None) -> int:
 
 
 def main() -> None:
+    """Run train.py across all folds and persist per-fold + aggregate metrics."""
     parser = argparse.ArgumentParser(description="Run stratified K-fold CV using train.py.")
     parser.add_argument("--base_team_name", type=str, required=True)
     parser.add_argument("--num_folds", type=int, default=5)
@@ -54,6 +61,9 @@ def main() -> None:
     if args.num_folds < 2:
         raise ValueError("--num_folds must be >= 2")
 
+    # ------------------------------------------------------------
+    # 1) Output + runtime environment setup
+    # ------------------------------------------------------------
     results_root = Path(args.results_dir)
     results_root.mkdir(parents=True, exist_ok=True)
     cv_rows: list[dict] = []
@@ -65,10 +75,16 @@ def main() -> None:
         f"Starting CV: base_team_name={args.base_team_name} "
         f"num_folds={args.num_folds} seed={args.seed}"
     )
+    # train_args is passed as one quoted string; split it into argv tokens.
     base = shlex.split(args.train_args)
+    # ------------------------------------------------------------
+    # 2) Launch one train.py process per fold
+    # ------------------------------------------------------------
     for fold_idx in range(args.num_folds):
         team_name = f"{args.base_team_name}_fold{fold_idx}"
         run_name = team_name
+        # Each fold gets a stable run name so artifacts are deterministic:
+        #   <base_team_name>_fold0, _fold1, ...
         cmd = [
             "python",
             "-u",
@@ -100,12 +116,16 @@ def main() -> None:
         best_val_loss = None
         epochs_done = None
 
+        # Read fold metrics from checkpoint so interrupted runs still count.
         if ckpt_path.exists():
             ckpt = torch.load(ckpt_path, map_location="cpu")
             best_val_f1 = float(ckpt.get("best_val_f1", float("nan")))
             best_val_loss = float(ckpt.get("best_val_loss", float("nan")))
             epochs_done = int(ckpt.get("epoch", -1)) + 1
 
+        # Non-zero return code can still happen after writing artifacts
+        # (for example, environment-side post-run issues). If best_model exists,
+        # we keep the fold in the summary.
         if rc != 0 and not best_model_path.exists():
             print(f"fold failed rc={rc} and no best_model.pt")
         elif rc != 0 and best_model_path.exists():
@@ -124,6 +144,9 @@ def main() -> None:
             }
         )
 
+    # ------------------------------------------------------------
+    # 3) Aggregate fold metrics
+    # ------------------------------------------------------------
     valid = [r for r in cv_rows if r["best_val_f1"] is not None and np.isfinite(r["best_val_f1"])]
     vals = [float(r["best_val_f1"]) for r in valid]
     mean_f1 = float(np.mean(vals)) if vals else None
@@ -134,6 +157,7 @@ def main() -> None:
     out_csv = out_dir / f"{args.base_team_name}_cv.csv"
     out_json = out_dir / f"{args.base_team_name}_cv.json"
 
+    # Save tabular view for quick spreadsheet inspection.
     with out_csv.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f,
@@ -152,6 +176,7 @@ def main() -> None:
         for row in cv_rows:
             w.writerow(row)
 
+    # Save structured summary for scripts that select top folds.
     summary = {
         "base_team_name": args.base_team_name,
         "num_folds": args.num_folds,
