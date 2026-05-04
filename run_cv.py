@@ -43,6 +43,12 @@ def main() -> None:
         help="Quoted train.py args excluding team_name/run_name/fold args.",
     )
     parser.add_argument("--wandb_mode", type=str, default="disabled", choices=["disabled", "offline", "online"])
+    parser.add_argument(
+        "--cuda_alloc_conf",
+        type=str,
+        default="max_split_size_mb:64",
+        help="Value for PYTORCH_CUDA_ALLOC_CONF during fold training. Use empty string to disable.",
+    )
     args = parser.parse_args()
 
     if args.num_folds < 2:
@@ -52,6 +58,8 @@ def main() -> None:
     results_root.mkdir(parents=True, exist_ok=True)
     cv_rows: list[dict] = []
     env = {"WANDB_MODE": args.wandb_mode}
+    if args.cuda_alloc_conf:
+        env["PYTORCH_CUDA_ALLOC_CONF"] = args.cuda_alloc_conf
 
     print(
         f"Starting CV: base_team_name={args.base_team_name} "

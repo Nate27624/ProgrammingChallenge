@@ -319,70 +319,85 @@ def train_one_epoch(
     """Run one training epoch. Logs step-level loss to wandb."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
+    skipped_oom = 0
 
     pbar = tqdm(loader, desc="  Train", leave=False)
     non_blocking = device.type == "cuda"
     for specs, labels in pbar:
-        specs = specs.to(device, non_blocking=non_blocking)
-        labels = labels.to(device, non_blocking=non_blocking)
+        try:
+            specs = specs.to(device, non_blocking=non_blocking)
+            labels = labels.to(device, non_blocking=non_blocking)
 
-        if apply_gpu_specaugment:
-            specs = apply_specaugment_batch(
-                specs,
-                num_time_masks=num_time_masks,
-                time_mask_param=time_mask_param,
-                num_freq_masks=num_freq_masks,
-                freq_mask_param=freq_mask_param,
+            if apply_gpu_specaugment:
+                specs = apply_specaugment_batch(
+                    specs,
+                    num_time_masks=num_time_masks,
+                    time_mask_param=time_mask_param,
+                    num_freq_masks=num_freq_masks,
+                    freq_mask_param=freq_mask_param,
+                )
+
+            optimizer.zero_grad()
+            use_mixup = (
+                mixup_alpha > 0.0
+                and mixup_prob > 0.0
+                and torch.rand(1).item() < mixup_prob
+                and specs.size(0) > 1
             )
-
-        optimizer.zero_grad()
-        use_mixup = (
-            mixup_alpha > 0.0
-            and mixup_prob > 0.0
-            and torch.rand(1).item() < mixup_prob
-            and specs.size(0) > 1
-        )
-        lam = None
-        perm = None
-        mixed_specs = specs
-        if use_mixup:
-            lam = float(np.random.beta(mixup_alpha, mixup_alpha))
-            perm = torch.randperm(specs.size(0), device=device)
-            mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
-        mixed_labels = labels
-
-        if use_sam:
-            logits = model(mixed_specs)
+            lam = None
+            perm = None
+            mixed_specs = specs
             if use_mixup:
-                loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
-            else:
-                loss = criterion(logits, labels)
-            loss.backward()
-            if max_grad_norm is not None and max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.first_step(zero_grad=True)
+                lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                perm = torch.randperm(specs.size(0), device=device)
+                mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
+            mixed_labels = labels
 
-            logits = model(mixed_specs)
-            if use_mixup:
-                loss_second = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+            if use_sam:
+                logits = model(mixed_specs)
+                if use_mixup:
+                    loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+                else:
+                    loss = criterion(logits, labels)
+                loss.backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.first_step(zero_grad=True)
+
+                logits = model(mixed_specs)
+                if use_mixup:
+                    loss_second = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+                else:
+                    loss_second = criterion(logits, labels)
+                loss_second.backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.second_step(zero_grad=True)
+                loss_value = loss_second.item()
             else:
-                loss_second = criterion(logits, labels)
-            loss_second.backward()
-            if max_grad_norm is not None and max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.second_step(zero_grad=True)
-            loss_value = loss_second.item()
-        else:
-            logits = model(mixed_specs)
-            if use_mixup:
-                loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
-            else:
-                loss = criterion(logits, labels)
-            loss.backward()
-            if max_grad_norm is not None and max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.step()
-            loss_value = loss.item()
+                logits = model(mixed_specs)
+                if use_mixup:
+                    loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+                else:
+                    loss = criterion(logits, labels)
+                loss.backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+                loss_value = loss.item()
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "out of memory" in msg and device.type == "cuda":
+                skipped_oom += 1
+                optimizer.zero_grad(set_to_none=True)
+                if "specs" in locals():
+                    del specs
+                if "labels" in locals():
+                    del labels
+                torch.cuda.empty_cache()
+                pbar.set_postfix({"oom_skips": skipped_oom})
+                continue
+            raise
 
         total_loss += loss_value * specs.size(0)
         correct    += (logits.argmax(dim=1) == mixed_labels).sum().item()
@@ -393,6 +408,10 @@ def train_one_epoch(
 
         pbar.set_postfix({"loss": f"{loss_value:.4f}"})
 
+    if skipped_oom > 0:
+        print(f"  [warn] skipped {skipped_oom} train batch(es) due to CUDA OOM.")
+    if total == 0:
+        return float("inf"), 0.0
     return total_loss / total, correct / total
 
 
@@ -402,15 +421,29 @@ def validate(model, loader, criterion, device):
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
     all_preds, all_labels = [], []
+    skipped_oom = 0
 
     pbar = tqdm(loader, desc="  Val  ", leave=False)
     non_blocking = device.type == "cuda"
     with torch.no_grad():
         for specs, labels in pbar:
-            specs = specs.to(device, non_blocking=non_blocking)
-            labels = labels.to(device, non_blocking=non_blocking)
-            logits = model(specs)
-            loss   = criterion(logits, labels)
+            try:
+                specs = specs.to(device, non_blocking=non_blocking)
+                labels = labels.to(device, non_blocking=non_blocking)
+                logits = model(specs)
+                loss   = criterion(logits, labels)
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                if "out of memory" in msg and device.type == "cuda":
+                    skipped_oom += 1
+                    if "specs" in locals():
+                        del specs
+                    if "labels" in locals():
+                        del labels
+                    torch.cuda.empty_cache()
+                    pbar.set_postfix({"oom_skips": skipped_oom})
+                    continue
+                raise
 
             total_loss += loss.item() * specs.size(0)
             preds = logits.argmax(dim=1)
@@ -421,6 +454,10 @@ def validate(model, loader, criterion, device):
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
+    if skipped_oom > 0:
+        print(f"  [warn] skipped {skipped_oom} val batch(es) due to CUDA OOM.")
+    if total == 0:
+        return float("inf"), 0.0, 0.0
     weighted_f1 = f1_score(all_labels, all_preds, average="weighted")
     return total_loss / total, correct / total, weighted_f1
 

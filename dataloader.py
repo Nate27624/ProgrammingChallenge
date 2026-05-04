@@ -165,6 +165,12 @@ class SpeechEmotionDataset(Dataset):
             if peak > 0:
                 waveform = waveform / peak
 
+        # Hard cap waveform duration before feature extraction to avoid memory spikes
+        # on very long utterances. This keeps MFCC/Mel computation bounded.
+        max_samples = int(self.max_frames * HOP_SIZE)
+        if waveform.shape[-1] > max_samples:
+            waveform = waveform[..., :max_samples]
+
         # Features: (1, n_features, time_frames)
         spec = self.transform(waveform)
 
