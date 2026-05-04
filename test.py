@@ -29,7 +29,6 @@ Output:
 
 import argparse
 import csv
-import json
 import torch
 import torchaudio.transforms as T
 from pathlib import Path
@@ -38,42 +37,9 @@ from sklearn.metrics import f1_score, classification_report, confusion_matrix
 
 from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
                         SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
-from baseline import BaselineLSTM, CNNBiLSTMAttentionSER
-
-try:
-    import wandb  # type: ignore
-except Exception:
-    class _NoOpTable:
-        def __init__(self, columns=None):
-            self.columns = columns or []
-
-        def add_data(self, *args):
-            return None
-
-    class _NoOpPlot:
-        @staticmethod
-        def confusion_matrix(**kwargs):
-            return {}
-
-    class _NoOpWandb:
-        def __init__(self):
-            self.summary = {}
-            self.plot = _NoOpPlot()
-            self.Table = _NoOpTable
-
-        @staticmethod
-        def init(*args, **kwargs):
-            return None
-
-        @staticmethod
-        def log(*args, **kwargs):
-            return None
-
-        @staticmethod
-        def finish(*args, **kwargs):
-            return None
-
-    wandb = _NoOpWandb()
+from baseline import BaselineLSTM
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER, TemporalFrequencyMambaSER
+from wandb_compat import wandb
 
 
 # ── Inference ──────────────────────────────────────────────────────────────────
@@ -159,6 +125,7 @@ def save_submission(team_name, clip_ids, preds, results_dir):
     The leaderboard script computes the score server-side from this CSV
     against the ground truth — no self-reported scores.
     """
+    results_dir.mkdir(parents=True, exist_ok=True)
     filename = results_dir / (team_name.replace(" ", "_") + ".csv")
     with open(filename, "w", newline="") as f:
         writer = csv.writer(f)
@@ -175,6 +142,15 @@ def main(args):
     results_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     model_path  = results_dir / "best_model.pt"
     stats_path  = results_dir / "norm_stats.pt"
+    # Submission-friendly fallback: allow root-level artifacts.
+    if not model_path.exists():
+        fallback_model = Path("best_model.pt")
+        if fallback_model.exists():
+            model_path = fallback_model
+    if not stats_path.exists():
+        fallback_stats = Path("norm_stats.pt")
+        if fallback_stats.exists():
+            stats_path = fallback_stats
 
     print(f"Device: {device}")
 
@@ -234,14 +210,41 @@ def main(args):
 
     # Load model
     in_channels = 3 if include_deltas else 1
-    if model_name == "bilstm_attention":
-        model = CNNBiLSTMAttentionSER(
-            input_channels=in_channels,
+    if model_name == "mamba":
+        model = BidirectionalMambaSER(
+            in_channels=in_channels,
             n_features=n_features,
             cnn_channels=int(model_config.get("cnn_channels", 64)),
-            hidden_size=int(model_config.get("hidden_size", 192)),
-            num_layers=int(model_config.get("num_layers", 1)),
+            d_model=int(model_config.get("mamba_d_model", 128)),
+            d_state=int(model_config.get("mamba_d_state", 32)),
+            d_conv=int(model_config.get("mamba_d_conv", 4)),
+            expand=int(model_config.get("mamba_expand", 2)),
+            num_layers=int(model_config.get("num_layers", 2)),
             dropout=float(model_config.get("dropout", 0.2)),
+            frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
+            fusion_type=str(model_config.get("fusion_type", "concat")),
+            pooling_type=str(model_config.get("pooling_type", "meanmax")),
+        ).to(device)
+    elif model_name == "tf_mamba":
+        model = TemporalFrequencyMambaSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            d_model=int(model_config.get("mamba_d_model", 128)),
+            d_state=int(model_config.get("mamba_d_state", 32)),
+            d_conv=int(model_config.get("mamba_d_conv", 4)),
+            expand=int(model_config.get("mamba_expand", 2)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.2)),
+            pooling_type=str(model_config.get("pooling_type", "meanmax")),
+        ).to(device)
+    elif model_name == "bilstm_attention":
+        model = CNNBiLSTMAttentionSER(
+            in_channels=in_channels,
+            n_features=n_features,
+            cnn_channels=int(model_config.get("cnn_channels", 64)),
+            hidden_size=int(model_config.get("hidden_size", 256)),
+            num_layers=int(model_config.get("num_layers", 2)),
+            dropout=float(model_config.get("dropout", 0.3)),
         ).to(device)
     else:
         input_size = n_features * in_channels
@@ -270,19 +273,6 @@ def main(args):
     weighted_f1, per_class_f1, emo_names = report(preds, labels)
     log_to_wandb(preds, labels, weighted_f1, per_class_f1, emo_names)
     wandb.finish()
-
-    metrics_path = results_dir / "test_metrics.json"
-    with open(metrics_path, "w") as f:
-        json.dump(
-            {
-                "team_name": args.team_name,
-                "weighted_f1": float(weighted_f1),
-                "per_class_f1": [float(x) for x in per_class_f1],
-            },
-            f,
-            indent=2,
-        )
-    print(f"Metrics saved to : {metrics_path}")
 
     # Extract clip IDs in the same order as predictions (shuffle=False)
     clip_ids = [clip_id for clip_id, _ in test_dataset.samples]
