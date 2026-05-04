@@ -33,6 +33,7 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from sklearn.metrics import f1_score
+from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 
 from dataloader import get_dataloaders, N_MELS, N_MFCC
 from baseline import BaselineLSTM
@@ -59,6 +60,8 @@ CONFIG = {
     "batch_size":    64,
     "learning_rate": 3e-4,
     "weight_decay":  1e-4,
+    "optimizer_type": "adamw",
+    "sam_rho": 0.05,
     "max_grad_norm": 1.0,
     "mixup_alpha": 0.0,
     "mixup_prob": 0.0,
@@ -70,9 +73,14 @@ CONFIG = {
     "warmup_epochs": 5,
     "min_lr_ratio": 0.1,
     "num_epochs":    100,
+    "use_swa": False,
+    "swa_start_epoch": 60,
+    "swa_lr": 1e-4,
     "patience":      10,      # early stopping patience (epochs)
     "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
     "val_split":     0.15,
+    "num_folds": 0,
+    "fold_index": -1,
     "include_deltas": True,
     "specaugment": True,
     "num_time_masks": 2,
@@ -123,6 +131,74 @@ class FocalLoss(nn.Module):
         focal_factor = (1.0 - pt).pow(self.gamma)
         loss = alpha_t * focal_factor * ce
         return loss.mean()
+
+
+class SAM(torch.optim.Optimizer):
+    """Sharpness-Aware Minimization wrapper for a base optimizer."""
+
+    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
+        if rho < 0.0:
+            raise ValueError(f"Invalid rho value: {rho}")
+        defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
+        super().__init__(params, defaults)
+
+        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
+        self.param_groups = self.base_optimizer.param_groups
+        self.defaults.update(self.base_optimizer.defaults)
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        grad_norm = self._grad_norm()
+        for group in self.param_groups:
+            scale = group["rho"] / (grad_norm + 1e-12)
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                self.state[p]["old_p"] = p.data.clone()
+                e_w = ((torch.pow(p, 2) if group["adaptive"] else 1.0) * p.grad * scale)
+                p.add_(e_w)
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                p.data = self.state[p]["old_p"]
+        self.base_optimizer.step()
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        if closure is None:
+            raise RuntimeError("SAM requires closure; use first_step/second_step.")
+        closure = torch.enable_grad()(closure)
+        self.first_step(zero_grad=True)
+        closure()
+        self.second_step()
+
+    def zero_grad(self):
+        self.base_optimizer.zero_grad()
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        self.base_optimizer.param_groups = self.param_groups
+
+    def _grad_norm(self):
+        shared_device = self.param_groups[0]["params"][0].device
+        norms = []
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                scale = torch.abs(p) if group["adaptive"] else 1.0
+                norms.append((scale * p.grad).norm(p=2).to(shared_device))
+        if not norms:
+            return torch.tensor(0.0, device=shared_device)
+        return torch.norm(torch.stack(norms), p=2)
 
 
 def _extract_train_labels(loader) -> list[int]:
@@ -238,58 +314,104 @@ def train_one_epoch(
     time_mask_param: int = 0,
     num_freq_masks: int = 0,
     freq_mask_param: int = 0,
+    use_sam: bool = False,
 ):
     """Run one training epoch. Logs step-level loss to wandb."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
+    skipped_oom = 0
 
     pbar = tqdm(loader, desc="  Train", leave=False)
     non_blocking = device.type == "cuda"
     for specs, labels in pbar:
-        specs = specs.to(device, non_blocking=non_blocking)
-        labels = labels.to(device, non_blocking=non_blocking)
+        try:
+            specs = specs.to(device, non_blocking=non_blocking)
+            labels = labels.to(device, non_blocking=non_blocking)
 
-        if apply_gpu_specaugment:
-            specs = apply_specaugment_batch(
-                specs,
-                num_time_masks=num_time_masks,
-                time_mask_param=time_mask_param,
-                num_freq_masks=num_freq_masks,
-                freq_mask_param=freq_mask_param,
+            if apply_gpu_specaugment:
+                specs = apply_specaugment_batch(
+                    specs,
+                    num_time_masks=num_time_masks,
+                    time_mask_param=time_mask_param,
+                    num_freq_masks=num_freq_masks,
+                    freq_mask_param=freq_mask_param,
+                )
+
+            optimizer.zero_grad()
+            use_mixup = (
+                mixup_alpha > 0.0
+                and mixup_prob > 0.0
+                and torch.rand(1).item() < mixup_prob
+                and specs.size(0) > 1
             )
-
-        optimizer.zero_grad()
-        use_mixup = (
-            mixup_alpha > 0.0
-            and mixup_prob > 0.0
-            and torch.rand(1).item() < mixup_prob
-            and specs.size(0) > 1
-        )
-        if use_mixup:
-            lam = float(np.random.beta(mixup_alpha, mixup_alpha))
-            perm = torch.randperm(specs.size(0), device=device)
-            mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
-            logits = model(mixed_specs)
-            loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+            lam = None
+            perm = None
+            mixed_specs = specs
+            if use_mixup:
+                lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                perm = torch.randperm(specs.size(0), device=device)
+                mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
             mixed_labels = labels
-        else:
-            logits = model(specs)
-            loss = criterion(logits, labels)
-            mixed_labels = labels
-        loss.backward()
-        if max_grad_norm is not None and max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        optimizer.step()
 
-        total_loss += loss.item() * specs.size(0)
+            if use_sam:
+                logits = model(mixed_specs)
+                if use_mixup:
+                    loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+                else:
+                    loss = criterion(logits, labels)
+                loss.backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.first_step(zero_grad=True)
+
+                logits = model(mixed_specs)
+                if use_mixup:
+                    loss_second = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+                else:
+                    loss_second = criterion(logits, labels)
+                loss_second.backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.second_step(zero_grad=True)
+                loss_value = loss_second.item()
+            else:
+                logits = model(mixed_specs)
+                if use_mixup:
+                    loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels[perm])
+                else:
+                    loss = criterion(logits, labels)
+                loss.backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+                loss_value = loss.item()
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "out of memory" in msg and device.type == "cuda":
+                skipped_oom += 1
+                optimizer.zero_grad(set_to_none=True)
+                if "specs" in locals():
+                    del specs
+                if "labels" in locals():
+                    del labels
+                torch.cuda.empty_cache()
+                pbar.set_postfix({"oom_skips": skipped_oom})
+                continue
+            raise
+
+        total_loss += loss_value * specs.size(0)
         correct    += (logits.argmax(dim=1) == mixed_labels).sum().item()
         total      += specs.size(0)
 
         # Step-level logging
-        wandb.log({"train/step_loss": loss.item()})
+        wandb.log({"train/step_loss": loss_value})
 
-        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        pbar.set_postfix({"loss": f"{loss_value:.4f}"})
 
+    if skipped_oom > 0:
+        print(f"  [warn] skipped {skipped_oom} train batch(es) due to CUDA OOM.")
+    if total == 0:
+        return float("inf"), 0.0
     return total_loss / total, correct / total
 
 
@@ -299,15 +421,29 @@ def validate(model, loader, criterion, device):
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
     all_preds, all_labels = [], []
+    skipped_oom = 0
 
     pbar = tqdm(loader, desc="  Val  ", leave=False)
     non_blocking = device.type == "cuda"
     with torch.no_grad():
         for specs, labels in pbar:
-            specs = specs.to(device, non_blocking=non_blocking)
-            labels = labels.to(device, non_blocking=non_blocking)
-            logits = model(specs)
-            loss   = criterion(logits, labels)
+            try:
+                specs = specs.to(device, non_blocking=non_blocking)
+                labels = labels.to(device, non_blocking=non_blocking)
+                logits = model(specs)
+                loss   = criterion(logits, labels)
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                if "out of memory" in msg and device.type == "cuda":
+                    skipped_oom += 1
+                    if "specs" in locals():
+                        del specs
+                    if "labels" in locals():
+                        del labels
+                    torch.cuda.empty_cache()
+                    pbar.set_postfix({"oom_skips": skipped_oom})
+                    continue
+                raise
 
             total_loss += loss.item() * specs.size(0)
             preds = logits.argmax(dim=1)
@@ -318,6 +454,10 @@ def validate(model, loader, criterion, device):
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
+    if skipped_oom > 0:
+        print(f"  [warn] skipped {skipped_oom} val batch(es) due to CUDA OOM.")
+    if total == 0:
+        return float("inf"), 0.0, 0.0
     weighted_f1 = f1_score(all_labels, all_preds, average="weighted")
     return total_loss / total, correct / total, weighted_f1
 
@@ -389,6 +529,8 @@ def main(args):
     config["batch_size"] = args.batch_size
     config["learning_rate"] = args.learning_rate
     config["weight_decay"] = args.weight_decay
+    config["optimizer_type"] = args.optimizer_type
+    config["sam_rho"] = args.sam_rho
     config["max_grad_norm"] = args.max_grad_norm
     config["mixup_alpha"] = args.mixup_alpha
     config["mixup_prob"] = args.mixup_prob
@@ -400,9 +542,14 @@ def main(args):
     config["warmup_epochs"] = args.warmup_epochs
     config["min_lr_ratio"] = args.min_lr_ratio
     config["num_epochs"] = args.num_epochs
+    config["use_swa"] = args.use_swa
+    config["swa_start_epoch"] = args.swa_start_epoch
+    config["swa_lr"] = args.swa_lr
     config["patience"] = args.patience
     config["patience_lr"] = args.patience_lr
     config["val_split"] = args.val_split
+    config["num_folds"] = args.num_folds
+    config["fold_index"] = args.fold_index
     config["speed_perturb_prob"] = args.speed_perturb_prob
     config["speed_perturb_min"] = args.speed_perturb_min
     config["speed_perturb_max"] = args.speed_perturb_max
@@ -410,6 +557,8 @@ def main(args):
     config["specaugment_on_gpu"] = args.specaugment_on_gpu
     config["feature_cache_dir"] = args.feature_cache_dir
     config["seed"] = args.seed
+    if config["num_folds"] > 1 and config["fold_index"] < 0:
+        raise ValueError("When --num_folds > 1, you must set --fold_index >= 0.")
 
     output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -444,6 +593,8 @@ def main(args):
         feature_type = config["feature_type"],
         n_features = config["n_features"],
         feature_cache_dir = config["feature_cache_dir"] or None,
+        num_folds = (config["num_folds"] if config["num_folds"] and config["num_folds"] > 1 else None),
+        fold_index = (config["fold_index"] if config["fold_index"] >= 0 else None),
     )
     if config["specaugment"] and config["specaugment_on_gpu"]:
         print(
@@ -471,6 +622,8 @@ def main(args):
                 "fusion_type": config["fusion_type"],
                 "pooling_type": config["pooling_type"],
                 "weight_decay": config["weight_decay"],
+                "optimizer_type": config["optimizer_type"],
+                "sam_rho": config["sam_rho"],
                 "max_grad_norm": config["max_grad_norm"],
                 "mixup_alpha": config["mixup_alpha"],
                 "mixup_prob": config["mixup_prob"],
@@ -481,10 +634,15 @@ def main(args):
                 "scheduler_type": config["scheduler_type"],
                 "warmup_epochs": config["warmup_epochs"],
                 "min_lr_ratio": config["min_lr_ratio"],
+                "use_swa": config["use_swa"],
+                "swa_start_epoch": config["swa_start_epoch"],
+                "swa_lr": config["swa_lr"],
                 "speed_perturb_prob": config["speed_perturb_prob"],
                 "speed_perturb_min": config["speed_perturb_min"],
                 "speed_perturb_max": config["speed_perturb_max"],
                 "seed": config["seed"],
+                "num_folds": config["num_folds"],
+                "fold_index": config["fold_index"],
             },
         },
         norm_stats_path
@@ -566,11 +724,31 @@ def main(args):
     else:
         raise ValueError(f"Unsupported loss_type: {config['loss_type']}")
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config["learning_rate"],
-        weight_decay=config["weight_decay"],
-    )
+    if config["optimizer_type"] == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config["learning_rate"],
+            weight_decay=config["weight_decay"],
+        )
+    elif config["optimizer_type"] == "sam":
+        optimizer = SAM(
+            model.parameters(),
+            base_optimizer=torch.optim.AdamW,
+            rho=config["sam_rho"],
+            adaptive=False,
+            lr=config["learning_rate"],
+            weight_decay=config["weight_decay"],
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer_type: {config['optimizer_type']}")
+
+    swa_model = None
+    swa_scheduler = None
+    swa_updates = 0
+    if config["use_swa"]:
+        swa_model = AveragedModel(model)
+        swa_scheduler = SWALR(optimizer, swa_lr=config["swa_lr"])
+
     if config["scheduler_type"] == "plateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=config["patience_lr"]
@@ -615,6 +793,9 @@ def main(args):
         train_accs       = ckpt["train_accs"]
         val_accs         = ckpt["val_accs"]
         wandb_id         = ckpt["wandb_id"]
+        swa_updates      = int(ckpt.get("swa_updates", 0))
+        if swa_model is not None and "swa_model_state_dict" in ckpt and ckpt["swa_model_state_dict"] is not None:
+            swa_model.load_state_dict(ckpt["swa_model_state_dict"])
         print(f"Resuming from epoch {start_epoch} | "
               f"best val loss so far: {best_val_loss:.4f}")
     else:
@@ -656,11 +837,16 @@ def main(args):
             time_mask_param=config["time_mask_param"],
             num_freq_masks=config["num_freq_masks"],
             freq_mask_param=config["freq_mask_param"],
+            use_sam=config["optimizer_type"] == "sam",
         )
         val_loss, val_acc, val_f1 = validate(
             model, val_loader, criterion, device
         )
-        if config["scheduler_type"] == "plateau":
+        if config["use_swa"] and swa_model is not None and swa_scheduler is not None and epoch >= config["swa_start_epoch"]:
+            swa_model.update_parameters(model)
+            swa_scheduler.step()
+            swa_updates += 1
+        elif config["scheduler_type"] == "plateau":
             scheduler.step(val_loss)
         else:
             scheduler.step()
@@ -722,10 +908,36 @@ def main(args):
             "train_accs":           train_accs,
             "val_accs":             val_accs,
             "wandb_id":             wandb_id,
+            "swa_updates":          swa_updates,
+            "swa_model_state_dict": swa_model.state_dict() if swa_model is not None else None,
             "config":               config,
         }, checkpoint_path)
 
     # ── Post-training ──────────────────────────────────────────────────────────
+    if config["use_swa"] and swa_model is not None and swa_updates > 0:
+        print(f"\nFinalizing SWA model from {swa_updates} update(s)...")
+        update_bn(train_loader, swa_model, device=device)
+        swa_val_loss, swa_val_acc, swa_val_f1 = validate(swa_model, val_loader, criterion, device)
+        print(
+            f"SWA val_loss: {swa_val_loss:.4f}  val_acc: {swa_val_acc:.4f}  val_f1: {swa_val_f1:.4f}"
+        )
+        wandb.log(
+            {
+                "swa/val_loss": swa_val_loss,
+                "swa/val_acc": swa_val_acc * 100.0,
+                "swa/val_f1": swa_val_f1,
+                "swa/updates": swa_updates,
+            }
+        )
+        is_better_swa = swa_val_f1 > best_val_f1 + 1e-6
+        is_swa_tie_better_loss = abs(swa_val_f1 - best_val_f1) <= 1e-6 and swa_val_loss < best_val_loss
+        if is_better_swa or is_swa_tie_better_loss:
+            best_val_f1 = swa_val_f1
+            best_val_loss = swa_val_loss
+            torch.save(swa_model.state_dict(), best_model_path)
+            print("  --> SWA replaced best_model.pt")
+        torch.save(swa_model.state_dict(), output_dir / "swa_model.pt")
+
     plot_curves(
         train_losses, val_losses,
         train_accs,   val_accs,
@@ -904,6 +1116,19 @@ if __name__ == "__main__":
         help="AdamW decoupled weight decay (default: 1e-4).",
     )
     parser.add_argument(
+        "--optimizer_type",
+        type=str,
+        choices=["adamw", "sam"],
+        default="adamw",
+        help="Optimizer type (default: adamw).",
+    )
+    parser.add_argument(
+        "--sam_rho",
+        type=float,
+        default=0.05,
+        help="SAM neighborhood radius rho (used when --optimizer_type sam).",
+    )
+    parser.add_argument(
         "--max_grad_norm",
         type=float,
         default=1.0,
@@ -978,6 +1203,24 @@ if __name__ == "__main__":
         help="Maximum training epochs (default: 100).",
     )
     parser.add_argument(
+        "--use_swa",
+        action="store_true",
+        default=False,
+        help="Enable stochastic weight averaging during late training.",
+    )
+    parser.add_argument(
+        "--swa_start_epoch",
+        type=int,
+        default=60,
+        help="Epoch index to start SWA updates (default: 60).",
+    )
+    parser.add_argument(
+        "--swa_lr",
+        type=float,
+        default=1e-4,
+        help="SWA learning rate (default: 1e-4).",
+    )
+    parser.add_argument(
         "--patience",
         type=int,
         default=10,
@@ -994,6 +1237,18 @@ if __name__ == "__main__":
         type=float,
         default=0.15,
         help="Validation split fraction (default: 0.15).",
+    )
+    parser.add_argument(
+        "--num_folds",
+        type=int,
+        default=0,
+        help="If >1, use stratified K-fold CV with this many folds.",
+    )
+    parser.add_argument(
+        "--fold_index",
+        type=int,
+        default=-1,
+        help="Fold index for K-fold mode (0-based). Used only when --num_folds > 1.",
     )
     parser.add_argument(
         "--speed_perturb_prob",
