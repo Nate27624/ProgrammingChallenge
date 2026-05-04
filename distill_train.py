@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from baseline import BaselineLSTM
 from dataloader import N_MELS, N_MFCC, get_dataloaders
-from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER, TemporalFrequencyMambaSER
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
 
 
 def set_seed(seed: int) -> None:
@@ -48,18 +48,6 @@ def build_model(model_name: str, cfg: dict, in_channels: int, n_features: int, d
             dropout=float(cfg.get("dropout", 0.2)),
             frontend_type=str(cfg.get("frontend_type", "basic_cnn")),
             fusion_type=str(cfg.get("fusion_type", "concat")),
-            pooling_type=str(cfg.get("pooling_type", "meanmax")),
-        )
-    elif model_name == "tf_mamba":
-        model = TemporalFrequencyMambaSER(
-            in_channels=in_channels,
-            n_features=n_features,
-            d_model=int(cfg.get("mamba_d_model", 128)),
-            d_state=int(cfg.get("mamba_d_state", 32)),
-            d_conv=int(cfg.get("mamba_d_conv", 4)),
-            expand=int(cfg.get("mamba_expand", 2)),
-            num_layers=int(cfg.get("num_layers", 2)),
-            dropout=float(cfg.get("dropout", 0.2)),
             pooling_type=str(cfg.get("pooling_type", "meanmax")),
         )
     elif model_name == "bilstm_attention":
@@ -128,7 +116,7 @@ def main():
     p.add_argument("--results_dir", type=str, default="results")
     p.add_argument("--teacher_runs", type=str, required=True, help="Comma-separated run names under results/")
     p.add_argument("--team_name", type=str, default="distilled_student")
-    p.add_argument("--student_model", type=str, default="bilstm_attention", choices=["baseline", "bilstm_attention", "mamba", "tf_mamba"])
+    p.add_argument("--student_model", type=str, default="bilstm_attention", choices=["baseline", "bilstm_attention", "mamba"])
     p.add_argument("--student_hidden_size", type=int, default=192)
     p.add_argument("--student_num_layers", type=int, default=1)
     p.add_argument("--student_dropout", type=float, default=0.2)

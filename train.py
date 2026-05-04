@@ -38,7 +38,7 @@ from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 
 from dataloader import get_dataloaders, N_MELS, N_MFCC
 from baseline import BaselineLSTM
-from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER, TemporalFrequencyMambaSER
+from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
 from wandb_compat import wandb
 
 
@@ -679,18 +679,6 @@ def main(args):
             fusion_type=config["fusion_type"],
             pooling_type=config["pooling_type"],
         ).to(device)
-    elif config["model_name"] == "tf_mamba":
-        model = TemporalFrequencyMambaSER(
-            in_channels=in_channels,
-            n_features=config["n_features"],
-            d_model=config["mamba_d_model"],
-            d_state=config["mamba_d_state"],
-            d_conv=config["mamba_d_conv"],
-            expand=config["mamba_expand"],
-            num_layers=config["num_layers"],
-            dropout=config["dropout"],
-            pooling_type=config["pooling_type"],
-        ).to(device)
     elif config["model_name"] == "bilstm_attention":
         model = CNNBiLSTMAttentionSER(
             in_channels=in_channels,
@@ -997,7 +985,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        choices=["baseline", "mamba", "tf_mamba", "bilstm_attention"],
+        choices=["baseline", "mamba", "bilstm_attention"],
         default="mamba",
         help="Model type to train (default: mamba).",
     )
