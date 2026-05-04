@@ -1,8 +1,0 @@
-{
-  "best_test_f1": 0.6441,
-  "best_seed": 3407,
-  "best_epoch_cap": 40,
-  "best_run_name": "ujwal_test_guided_seed3407",
-  "source_run_dir": "results\\ujwal_test_guided_seed3407",
-  "saved_at_unix": 1777839538.5560608
-}

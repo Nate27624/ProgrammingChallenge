@@ -1,8 +1,0 @@
-{
-  "best_test_f1": 0.602,
-  "seed": 23,
-  "best_epoch_cap": 35,
-  "run_name": "ujwal_pivot_v1_seed23",
-  "source_run_dir": "results\\ujwal_pivot_v1_seed23",
-  "saved_at_unix": 1777857725.2608004
-}

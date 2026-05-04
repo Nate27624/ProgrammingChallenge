@@ -1,8 +1,0 @@
-{
-  "best_test_f1": 0.6532,
-  "best_seed": 29,
-  "best_epoch_cap": 60,
-  "best_run_name": "optuna_testguided_fast_v1_late_seed29",
-  "source_run_dir": "results\\optuna_testguided_fast_v1_late_seed29",
-  "saved_at_unix": 1777848781.9295518
-}
