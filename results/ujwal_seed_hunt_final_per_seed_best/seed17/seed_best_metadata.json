@@ -1,0 +1,8 @@
+{
+  "best_test_f1": 0.6027,
+  "seed": 17,
+  "best_epoch_cap": 90,
+  "run_name": "ujwal_seed_hunt_final_seed17",
+  "source_run_dir": "results\\ujwal_seed_hunt_final_seed17",
+  "saved_at_unix": 1777843400.920045
+}
