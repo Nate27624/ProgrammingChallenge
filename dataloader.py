@@ -26,6 +26,7 @@ Usage:
 """
 
 import hashlib
+import os
 import torch
 import torchaudio
 import torchaudio.transforms as T
@@ -395,7 +396,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         cache_tag = cache_tag,
     )
 
-    pin_memory = torch.cuda.is_available()
+    # On Windows, pin_memory can increase host-memory pressure under small pagefiles.
+    pin_memory = torch.cuda.is_available() and os.name != "nt"
     persistent_workers = num_workers > 0
     train_loader = DataLoader(
         train_final, batch_size=batch_size,

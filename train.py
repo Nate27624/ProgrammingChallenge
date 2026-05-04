@@ -22,6 +22,7 @@ Outputs saved to <results_dir>/<team_name>/:
 import argparse
 import json
 import math
+import os
 import random
 import sys
 import uuid
@@ -557,6 +558,15 @@ def main(args):
     config["specaugment_on_gpu"] = args.specaugment_on_gpu
     config["feature_cache_dir"] = args.feature_cache_dir
     config["seed"] = args.seed
+
+    # Windows multiprocessing data workers are unstable under low pagefile
+    # conditions (shared-file mapping errors 1455). Force single-process loading.
+    if os.name == "nt" and config["num_workers"] > 0:
+        print(
+            f"Warning: forcing num_workers from {config['num_workers']} to 0 on Windows "
+            "to avoid shared-memory/pagefile worker crashes."
+        )
+        config["num_workers"] = 0
     if config["num_folds"] > 1 and config["fold_index"] < 0:
         raise ValueError("When --num_folds > 1, you must set --fold_index >= 0.")
 
