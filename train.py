@@ -71,6 +71,10 @@ CONFIG = {
     "cnn_channels": 64,
     "batch_size":    64,
     "learning_rate": 3e-4,
+    "weight_decay": 1e-4,
+    "label_smoothing": 0.05,
+    "mixup_alpha": 0.2,
+    "mixup_prob": 0.3,
     "num_epochs":    100,
     "patience":      10,      # early stopping patience (epochs)
     "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
@@ -81,11 +85,14 @@ CONFIG = {
     "time_mask_param": 24,
     "num_freq_masks": 2,
     "freq_mask_param": 8,
+    "speed_perturb_prob": 0.1,
+    "speed_perturb_min": 0.9,
+    "speed_perturb_max": 1.1,
 }
 
 
 # ── One training epoch ─────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(model, loader, criterion, optimizer, device, mixup_alpha=0.0, mixup_prob=0.0):
     """Run one training epoch. Logs step-level loss to wandb."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -94,9 +101,23 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     for specs, labels in pbar:
         specs, labels = specs.to(device), labels.to(device)
 
+        use_mixup = mixup_alpha > 0.0 and random.random() < mixup_prob
+        if use_mixup:
+            lam = np.random.beta(mixup_alpha, mixup_alpha)
+            perm = torch.randperm(specs.size(0), device=device)
+            mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
+            labels_perm = labels[perm]
+        else:
+            lam = 1.0
+            mixed_specs = specs
+            labels_perm = labels
+
         optimizer.zero_grad()
-        logits = model(specs)
-        loss   = criterion(logits, labels)
+        logits = model(mixed_specs)
+        if use_mixup:
+            loss = lam * criterion(logits, labels) + (1.0 - lam) * criterion(logits, labels_perm)
+        else:
+            loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
 
@@ -299,6 +320,10 @@ def main(args):
     config["cnn_channels"] = args.cnn_channels
     config["batch_size"] = args.batch_size
     config["learning_rate"] = args.learning_rate
+    config["weight_decay"] = args.weight_decay
+    config["label_smoothing"] = args.label_smoothing
+    config["mixup_alpha"] = args.mixup_alpha
+    config["mixup_prob"] = args.mixup_prob
     config["num_epochs"] = args.num_epochs
     config["patience"] = args.patience
     config["patience_lr"] = args.patience_lr
@@ -306,6 +331,9 @@ def main(args):
     config["seed"] = args.seed
     config["num_folds"] = args.num_folds
     config["fold_index"] = args.fold_index
+    config["speed_perturb_prob"] = args.speed_perturb_prob
+    config["speed_perturb_min"] = args.speed_perturb_min
+    config["speed_perturb_max"] = args.speed_perturb_max
 
     output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -330,6 +358,9 @@ def main(args):
         time_mask_param = config["time_mask_param"],
         num_freq_masks = config["num_freq_masks"],
         freq_mask_param = config["freq_mask_param"],
+        speed_perturb_prob = config["speed_perturb_prob"],
+        speed_perturb_min = config["speed_perturb_min"],
+        speed_perturb_max = config["speed_perturb_max"],
         feature_type = config["feature_type"],
         n_features = config["n_features"],
         num_folds = config["num_folds"],
@@ -378,8 +409,12 @@ def main(args):
     print(f"\nModel: {model.__class__.__name__}")
     print(f"Trainable parameters: {model.count_parameters():,}")
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
+    criterion = nn.CrossEntropyLoss(label_smoothing=config["label_smoothing"])
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config["learning_rate"],
+        weight_decay=config["weight_decay"],
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=config["patience_lr"]
     )
@@ -438,7 +473,13 @@ def main(args):
     for epoch in range(start_epoch, config["num_epochs"]):
 
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            mixup_alpha=config["mixup_alpha"],
+            mixup_prob=config["mixup_prob"],
         )
         val_loss, val_acc = validate(
             model, val_loader, criterion, device
@@ -623,6 +664,30 @@ if __name__ == "__main__":
         help="Learning rate (default: 3e-4).",
     )
     parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-4,
+        help="Adam weight decay (default: 1e-4).",
+    )
+    parser.add_argument(
+        "--label_smoothing",
+        type=float,
+        default=0.05,
+        help="Cross-entropy label smoothing (default: 0.05).",
+    )
+    parser.add_argument(
+        "--mixup_alpha",
+        type=float,
+        default=0.2,
+        help="Mixup Beta(alpha, alpha) parameter (0 disables mixup).",
+    )
+    parser.add_argument(
+        "--mixup_prob",
+        type=float,
+        default=0.3,
+        help="Probability of applying mixup on a batch (default: 0.3).",
+    )
+    parser.add_argument(
         "--num_epochs",
         type=int,
         default=100,
@@ -687,6 +752,24 @@ if __name__ == "__main__":
         type=int,
         default=8,
         help="Maximum width for each frequency mask (default: 8).",
+    )
+    parser.add_argument(
+        "--speed_perturb_prob",
+        type=float,
+        default=0.1,
+        help="Probability of waveform speed perturbation on train data.",
+    )
+    parser.add_argument(
+        "--speed_perturb_min",
+        type=float,
+        default=0.9,
+        help="Minimum speed perturbation factor.",
+    )
+    parser.add_argument(
+        "--speed_perturb_max",
+        type=float,
+        default=1.1,
+        help="Maximum speed perturbation factor.",
     )
     parser.add_argument(
         "--bank_mode",
