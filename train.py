@@ -361,7 +361,7 @@ def train_one_epoch(
                     loss = criterion(logits, labels)
                 loss.backward()
                 if max_grad_norm is not None and max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, foreach=False)
                 optimizer.first_step(zero_grad=True)
 
                 logits = model(mixed_specs)
@@ -371,7 +371,7 @@ def train_one_epoch(
                     loss_second = criterion(logits, labels)
                 loss_second.backward()
                 if max_grad_norm is not None and max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, foreach=False)
                 optimizer.second_step(zero_grad=True)
                 loss_value = loss_second.item()
             else:
@@ -382,7 +382,7 @@ def train_one_epoch(
                     loss = criterion(logits, labels)
                 loss.backward()
                 if max_grad_norm is not None and max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, foreach=False)
                 optimizer.step()
                 loss_value = loss.item()
         except RuntimeError as exc:
