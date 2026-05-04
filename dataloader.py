@@ -176,8 +176,8 @@ def compute_mean_std(dataset):
     return mean, std
 
 
-def _resolve_labels_csv(split_dir: Path, expected_name: str) -> Path:
-    """Resolve a labels CSV inside split_dir and create expected alias if needed."""
+def _resolve_labels_csv(split_dir: Path, expected_name: str, data_dir: Path, split_name: str) -> Path:
+    """Resolve labels CSV for a split; search local then recursively under data_dir."""
     expected = split_dir / expected_name
     if expected.exists():
         return expected
@@ -185,10 +185,30 @@ def _resolve_labels_csv(split_dir: Path, expected_name: str) -> Path:
     preferred = sorted(split_dir.glob("*_labels.csv"))
     candidates = preferred or sorted(split_dir.glob("*.csv"))
     if not candidates:
-        raise FileNotFoundError(
-            f"No CSV labels file found in '{split_dir}'. "
-            f"Expected '{expected_name}' or any '*.csv'."
-        )
+        # Fallback: search recursively under data_dir for likely labels CSVs.
+        recursive = sorted(data_dir.rglob("*.csv"))
+        ranked = []
+        for p in recursive:
+            name = p.name.lower()
+            score = 0
+            if "label" in name:
+                score += 10
+            if split_name in name:
+                score += 8
+            if p.parent.name.lower() == split_name:
+                score += 6
+            if "train" in name and split_name == "train":
+                score += 4
+            if "test" in name and split_name == "test":
+                score += 4
+            ranked.append((score, p))
+        ranked.sort(key=lambda x: (x[0], str(x[1])), reverse=True)
+        candidates = [p for score, p in ranked if score > 0]
+        if not candidates:
+            raise FileNotFoundError(
+                f"No CSV labels file found for split '{split_name}'. "
+                f"Searched '{split_dir}' and recursively under '{data_dir}'."
+            )
 
     chosen = candidates[0]
     # Create the expected filename alias so downstream code remains consistent.
@@ -228,8 +248,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     data_dir = Path(data_dir)
     train_dir = data_dir / "train"
     test_dir  = data_dir / "test"
-    train_labels_csv = _resolve_labels_csv(train_dir, "train_labels.csv")
-    test_labels_csv = _resolve_labels_csv(test_dir, "test_labels.csv")
+    train_labels_csv = _resolve_labels_csv(train_dir, "train_labels.csv", data_dir, "train")
+    test_labels_csv = _resolve_labels_csv(test_dir, "test_labels.csv", data_dir, "test")
 
     if n_features is None:
         n_features = N_MFCC if feature_type == "mfcc" else N_MELS
