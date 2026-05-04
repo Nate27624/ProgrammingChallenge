@@ -42,6 +42,94 @@ from model import CNNBiLSTMAttentionSER
 from wandb_compat import wandb
 
 
+# ── Artifact/config helpers ───────────────────────────────────────────────────
+def resolve_artifact_paths(results_root: str, team_name: str) -> tuple[Path, Path, Path]:
+    """Resolve run directory + expected model/stats artifact paths.
+
+    Returns:
+        run_dir:     results/<team_name_sanitized>
+        model_path:  run_dir/best_model.pt (or root fallback if present)
+        stats_path:  run_dir/norm_stats.pt (or root fallback if present)
+    """
+    run_dir = Path(results_root) / team_name.replace(" ", "_")
+    model_path = run_dir / "best_model.pt"
+    stats_path = run_dir / "norm_stats.pt"
+
+    # Submission-friendly fallback:
+    # Some users place artifacts in repo root. Keep this to avoid hard failure.
+    if not model_path.exists():
+        fallback_model = Path("best_model.pt")
+        if fallback_model.exists():
+            model_path = fallback_model
+    if not stats_path.exists():
+        fallback_stats = Path("norm_stats.pt")
+        if fallback_stats.exists():
+            stats_path = fallback_stats
+
+    return run_dir, model_path, stats_path
+
+
+def load_saved_stats(stats_path: Path) -> dict:
+    """Load normalization + model metadata saved by train.py."""
+    return torch.load(stats_path, map_location="cpu")
+
+
+def find_test_labels_csv(test_dir: Path) -> Path:
+    """Find the expected labels CSV in test dir (e.g., test_labels.csv)."""
+    csv_files = list(test_dir.glob("*_labels.csv"))
+    if not csv_files:
+        raise FileNotFoundError(f"No *_labels.csv found in {test_dir}")
+    return csv_files[0]
+
+
+def build_feature_transform(feature_type: str, n_features: int):
+    """Build MFCC or Mel transform according to saved training metadata."""
+    if feature_type == "mfcc":
+        transform = T.MFCC(
+            sample_rate=SAMPLE_RATE,
+            n_mfcc=n_features,
+            melkwargs={
+                "n_fft": WIN_SIZE,
+                "hop_length": HOP_SIZE,
+                "n_mels": N_MELS,
+            },
+        )
+        apply_db = False
+    else:
+        transform = T.MelSpectrogram(
+            sample_rate=SAMPLE_RATE,
+            n_fft=WIN_SIZE,
+            hop_length=HOP_SIZE,
+            n_mels=n_features,
+        )
+        apply_db = True
+    return transform, apply_db
+
+
+def build_test_loader(
+    test_dir: Path,
+    labels_csv: Path,
+    feature_transform,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    include_deltas: bool,
+    apply_db: bool,
+) -> tuple[SpeechEmotionDataset, DataLoader]:
+    """Create test dataset/loader with exactly the same preprocessing as train."""
+    test_dataset = SpeechEmotionDataset(
+        audio_dir=test_dir / "audio",
+        labels_csv=labels_csv,
+        transform=feature_transform,
+        max_frames=MAX_FRAMES,
+        mean=mean,
+        std=std,
+        include_deltas=include_deltas,
+        apply_db=apply_db,
+    )
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=0)
+    return test_dataset, test_loader
+
+
 # ── Inference ──────────────────────────────────────────────────────────────────
 def evaluate(model, loader, device):
     """Run inference and return predictions and ground-truth labels."""
@@ -59,7 +147,13 @@ def evaluate(model, loader, device):
 
 
 def evaluate_ensemble(models, loader, device):
-    """Run inference with an ensemble by averaging member logits."""
+    """Run inference with an ensemble by averaging member logits.
+
+    Why logits (pre-softmax) and not probabilities?
+      - Logit averaging is numerically stable.
+      - It preserves richer confidence structure than hard-vote aggregation.
+      - Softmax is monotonic, so argmax(logit-sum) is a valid final decision rule.
+    """
     for model in models:
         model.eval()
     all_preds, all_labels = [], []
@@ -67,12 +161,13 @@ def evaluate_ensemble(models, loader, device):
     with torch.no_grad():
         for specs, labels in loader:
             specs = specs.to(device)
-            # Logit averaging is used instead of majority voting because it
-            # preserves confidence information from each member.
+            # `logits_sum` accumulates each member's class evidence.
             logits_sum = None
             for model in models:
                 logits = model(specs)
+                # First member initializes accumulator; remaining members add.
                 logits_sum = logits if logits_sum is None else logits_sum + logits
+            # Final class = argmax of mean/sum logits (sum is equivalent up to scale).
             preds = logits_sum.argmax(dim=1)
             all_preds.extend(preds.cpu().tolist())
             all_labels.extend(labels.tolist())
@@ -81,10 +176,21 @@ def evaluate_ensemble(models, loader, device):
 
 
 def build_model(model_name, model_config, in_channels, n_features, device):
-    """Construct the exact model architecture described by saved norm_stats."""
+    """Construct the model architecture described by saved norm_stats.
+
+    Notes:
+      - `model_name` + `model_config` are taken from `norm_stats.pt`.
+      - This lets test.py reconstruct the exact architecture used at train time.
+      - Legacy `mamba` metadata is mapped to `bilstm_attention` for compatibility
+        because Mamba classes were removed from model.py.
+    """
+    # Compatibility shim for old checkpoints:
+    # old runs may still encode `model_name="mamba"` in norm_stats.
     if model_name == "mamba":
         print("Warning: mamba model metadata detected; mapping to bilstm_attention.")
         model_name = "bilstm_attention"
+
+    # Primary maintained architecture path.
     if model_name == "bilstm_attention":
         model = CNNBiLSTMAttentionSER(
             in_channels=in_channels,
@@ -95,6 +201,7 @@ def build_model(model_name, model_config, in_channels, n_features, device):
             dropout=float(model_config.get("dropout", 0.3)),
         )
     else:
+        # Baseline fallback path (older/simpler runs).
         input_size = n_features * in_channels
         model = BaselineLSTM(
             input_size=input_size,
@@ -187,23 +294,16 @@ def save_submission(team_name, clip_ids, preds, results_dir):
 def main(args):
     """Load artifacts, run evaluation, log metrics, and emit submission CSV."""
     device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    results_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
-    model_path  = results_dir / "best_model.pt"
-    stats_path  = results_dir / "norm_stats.pt"
-    # Submission-friendly fallback: allow root-level artifacts.
-    if not model_path.exists():
-        fallback_model = Path("best_model.pt")
-        if fallback_model.exists():
-            model_path = fallback_model
-    if not stats_path.exists():
-        fallback_stats = Path("norm_stats.pt")
-        if fallback_stats.exists():
-            stats_path = fallback_stats
+    results_dir, model_path, stats_path = resolve_artifact_paths(
+        args.results_dir, args.team_name
+    )
 
     print(f"Device: {device}")
 
-    # Load normalisation statistics saved by train.py
-    stats     = torch.load(stats_path, map_location="cpu")
+    # ------------------------------------------------------------
+    # 1) Load saved training metadata (normalization + feature/model config)
+    # ------------------------------------------------------------
+    stats = load_saved_stats(stats_path)
     mean, std = stats["mean"], stats["std"]
     include_deltas = bool(stats.get("include_deltas", False))
     feature_type = stats.get("feature_type", "mel")
@@ -211,55 +311,33 @@ def main(args):
     model_name = stats.get("model_name", "baseline")
     model_config = stats.get("model_config", {})
 
-    # Locate labels CSV inside the test directory
-    test_dir  = Path(args.test_dir)
-    csv_files = list(test_dir.glob("*_labels.csv"))
-    if not csv_files:
-        raise FileNotFoundError(f"No *_labels.csv found in {test_dir}")
-    labels_csv = csv_files[0]
+    # ------------------------------------------------------------
+    # 2) Build test data pipeline
+    # ------------------------------------------------------------
+    test_dir = Path(args.test_dir)
+    labels_csv = find_test_labels_csv(test_dir)
     print(f"\nTest directory : {test_dir}")
     print(f"Labels file    : {labels_csv.name}")
 
-    # Build test DataLoader
-    if feature_type == "mfcc":
-        feature_transform = T.MFCC(
-            sample_rate=SAMPLE_RATE,
-            n_mfcc=n_features,
-            melkwargs={
-                "n_fft": WIN_SIZE,
-                "hop_length": HOP_SIZE,
-                "n_mels": N_MELS,
-            },
-        )
-        apply_db = False
-    else:
-        feature_transform = T.MelSpectrogram(
-            sample_rate=SAMPLE_RATE,
-            n_fft=WIN_SIZE,
-            hop_length=HOP_SIZE,
-            n_mels=n_features,
-        )
-        apply_db = True
-
-    test_dataset = SpeechEmotionDataset(
-        audio_dir  = test_dir / "audio",
-        labels_csv = labels_csv,
-        transform  = feature_transform,
-        max_frames = MAX_FRAMES,
-        mean       = mean,
-        std        = std,
-        include_deltas = include_deltas,
-        apply_db = apply_db,
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=64, shuffle=False, num_workers=0
+    feature_transform, apply_db = build_feature_transform(feature_type, n_features)
+    test_dataset, test_loader = build_test_loader(
+        test_dir=test_dir,
+        labels_csv=labels_csv,
+        feature_transform=feature_transform,
+        mean=mean,
+        std=std,
+        include_deltas=include_deltas,
+        apply_db=apply_db,
     )
     print(f"Test clips     : {len(test_dataset)}")
 
-    # Load model
+    # ------------------------------------------------------------
+    # 3) Load checkpoint and evaluate
+    # ------------------------------------------------------------
     in_channels = 3 if include_deltas else 1
     ckpt = torch.load(model_path, map_location="cpu")
-    # Ensemble checkpoints contain multiple full member state dicts.
+
+    # Ensemble checkpoints contain a member list with model metadata + weights.
     if (
         model_name == "ensemble"
         and isinstance(ckpt, dict)
@@ -279,6 +357,7 @@ def main(args):
             state_dict = member.get("state_dict", None)
             if state_dict is None:
                 continue
+            # Rebuild each member architecture from saved metadata.
             model = build_model(m_name, m_cfg, in_channels, n_features, device)
             model.load_state_dict(state_dict)
             ensemble_models.append(model)
@@ -316,6 +395,7 @@ def main(args):
     wandb.finish()
 
     # Extract clip IDs in the same order as predictions (shuffle=False)
+    # Important: `DataLoader(shuffle=False)` preserves `test_dataset.samples` order.
     clip_ids = [clip_id for clip_id, _ in test_dataset.samples]
 
     # Always write leaderboard submission CSV
