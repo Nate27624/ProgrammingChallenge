@@ -1,0 +1,39 @@
+{
+  "base_team_name": "finlike_main_s42",
+  "num_folds": 3,
+  "seed": 42,
+  "mean_best_val_f1": 0.6301168264838559,
+  "std_best_val_f1": 0.00966340356493526,
+  "fold_rows": [
+    {
+      "fold_index": 0,
+      "team_name": "finlike_main_s42_fold0",
+      "return_code": 0,
+      "duration_sec": 1066.6968631744385,
+      "epochs_done": 100,
+      "best_val_f1": 0.6423330328451219,
+      "best_val_loss": 1.2259847828329284,
+      "best_model_exists": true
+    },
+    {
+      "fold_index": 1,
+      "team_name": "finlike_main_s42_fold1",
+      "return_code": 0,
+      "duration_sec": 661.3182711601257,
+      "epochs_done": 56,
+      "best_val_f1": 0.6293139357676233,
+      "best_val_loss": 1.1895794889066955,
+      "best_model_exists": true
+    },
+    {
+      "fold_index": 2,
+      "team_name": "finlike_main_s42_fold2",
+      "return_code": 0,
+      "duration_sec": 513.735894203186,
+      "epochs_done": 41,
+      "best_val_f1": 0.6187035108388226,
+      "best_val_loss": 1.098828213776162,
+      "best_model_exists": true
+    }
+  ]
+}

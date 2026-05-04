@@ -1,0 +1,4 @@
+fold_index,team_name,return_code,duration_sec,epochs_done,best_val_f1,best_val_loss,best_model_exists
+0,finlike_main_s42_fold0,0,1066.6968631744385,100,0.6423330328451219,1.2259847828329284,True
+1,finlike_main_s42_fold1,0,661.3182711601257,56,0.6293139357676233,1.1895794889066955,True
+2,finlike_main_s42_fold2,0,513.735894203186,41,0.6187035108388226,1.098828213776162,True
