@@ -26,7 +26,7 @@
   "scheduler_type": "warmup_cosine",
   "warmup_epochs": 5,
   "min_lr_ratio": 0.01,
-  "num_epochs": 100,
+  "num_epochs": 70,
   "patience": 15,
   "patience_lr": 5,
   "val_split": 0.15,
@@ -42,5 +42,5 @@
   "num_workers": 0,
   "specaugment_on_gpu": true,
   "feature_cache_dir": "results/_feature_cache",
-  "seed": 29
+  "seed": 31
 }
