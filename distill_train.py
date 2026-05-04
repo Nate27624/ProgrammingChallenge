@@ -143,6 +143,8 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--feature_cache_dir", type=str, default="results/_feature_cache")
+    p.add_argument("--num_folds", type=int, default=0, help="Enable CV mode when > 1.")
+    p.add_argument("--fold_index", type=int, default=-1, help="0-based fold index for CV mode.")
     args = p.parse_args()
 
     set_seed(args.seed)
@@ -150,6 +152,8 @@ def main():
     results_dir = Path(args.results_dir)
     out_dir = results_dir / args.team_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.num_folds > 1 and args.fold_index < 0:
+        raise ValueError("When --num_folds > 1, you must set --fold_index >= 0.")
 
     teacher_names = [x.strip() for x in args.teacher_runs.split(",") if x.strip()]
     if not teacher_names:
@@ -181,6 +185,8 @@ def main():
         n_features=base["n_features"],
         speed_perturb_prob=0.0,
         feature_cache_dir=args.feature_cache_dir,
+        num_folds=(args.num_folds if args.num_folds > 1 else None),
+        fold_index=(args.fold_index if args.fold_index >= 0 else None),
     )
 
     student_cfg = {
@@ -290,6 +296,8 @@ def main():
                 "alpha_kd": alpha,
                 "best_val_f1": best_f1,
                 "best_val_loss": best_loss,
+                "num_folds": args.num_folds,
+                "fold_index": args.fold_index,
             },
             indent=2,
         ),
