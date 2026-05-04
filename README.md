@@ -10,7 +10,7 @@
 - `create_ensemble_checkpoint.py`
 - `final_cv_ensemble_pipeline.py`
 - `distill_train.py`
-- `baseline.py`, `wandb_compat.py` (runtime dependencies)
+- `baseline.py` (runtime dependency)
 
 ## Environment
 
