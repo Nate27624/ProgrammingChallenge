@@ -66,3 +66,16 @@ results/final_run/final_run.csv
 `test.py` will use root `best_model.pt` and `norm_stats.pt` if
 `results/<team_name>/best_model.pt` or `norm_stats.pt` are missing.
 
+## Optional: Distillation
+
+Use `distill_train.py` to train a single student model from one or more
+teacher runs in `results/`.
+
+```bash
+python distill_train.py \
+  --data_dir dataset \
+  --results_dir results \
+  --teacher_runs "runA,runB" \
+  --team_name distilled_student \
+  --student_model bilstm_attention
+```
