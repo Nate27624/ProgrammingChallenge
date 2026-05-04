@@ -1,0 +1,4 @@
+fold_index,team_name,return_code,duration_sec,epochs_done,best_val_f1,best_val_loss,best_model_exists
+0,cv_mainsearch_v1_fold0,0,534.4251790046692,85,0.6475491366695741,1.1337048197461668,True
+1,cv_mainsearch_v1_fold1,0,511.2918803691864,73,0.630396100363999,1.2058289972803762,True
+2,cv_mainsearch_v1_fold2,0,490.7746386528015,70,0.6254368703858222,1.1431412068607998,True

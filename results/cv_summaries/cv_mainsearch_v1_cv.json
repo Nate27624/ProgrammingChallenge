@@ -1,0 +1,39 @@
+{
+  "base_team_name": "cv_mainsearch_v1",
+  "num_folds": 3,
+  "seed": 42,
+  "mean_best_val_f1": 0.6344607024731318,
+  "std_best_val_f1": 0.009473782165536758,
+  "fold_rows": [
+    {
+      "fold_index": 0,
+      "team_name": "cv_mainsearch_v1_fold0",
+      "return_code": 0,
+      "duration_sec": 534.4251790046692,
+      "epochs_done": 85,
+      "best_val_f1": 0.6475491366695741,
+      "best_val_loss": 1.1337048197461668,
+      "best_model_exists": true
+    },
+    {
+      "fold_index": 1,
+      "team_name": "cv_mainsearch_v1_fold1",
+      "return_code": 0,
+      "duration_sec": 511.2918803691864,
+      "epochs_done": 73,
+      "best_val_f1": 0.630396100363999,
+      "best_val_loss": 1.2058289972803762,
+      "best_model_exists": true
+    },
+    {
+      "fold_index": 2,
+      "team_name": "cv_mainsearch_v1_fold2",
+      "return_code": 0,
+      "duration_sec": 490.7746386528015,
+      "epochs_done": 70,
+      "best_val_f1": 0.6254368703858222,
+      "best_val_loss": 1.1431412068607998,
+      "best_model_exists": true
+    }
+  ]
+}

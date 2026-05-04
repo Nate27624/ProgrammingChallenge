@@ -1,0 +1,4 @@
+fold_index,team_name,return_code,duration_sec,epochs_done,best_val_f1,best_val_loss,best_model_exists
+0,cv_fast_v1_fold0,1,39.497722864151,,,,False
+1,cv_fast_v1_fold1,1,39.75294041633606,,,,False
+2,cv_fast_v1_fold2,1,40.632110595703125,,,,False

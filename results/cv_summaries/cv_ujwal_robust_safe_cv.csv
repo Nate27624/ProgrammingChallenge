@@ -1,0 +1,4 @@
+fold_index,team_name,return_code,duration_sec,epochs_done,best_val_f1,best_val_loss,best_model_exists
+0,cv_ujwal_robust_safe_fold0,1,8.977564334869385,,,,False
+1,cv_ujwal_robust_safe_fold1,1,9.081222295761108,,,,False
+2,cv_ujwal_robust_safe_fold2,1,9.487337827682495,,,,False
