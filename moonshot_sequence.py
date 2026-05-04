@@ -153,6 +153,12 @@ def main() -> None:
     parser.add_argument("--end_epoch", type=int, default=95)
     parser.add_argument("--epoch_step", type=int, default=5)
     parser.add_argument("--top_k", type=int, default=25)
+    parser.add_argument(
+        "--allow_nonzero_train_rc_if_model_exists",
+        action="store_true",
+        default=True,
+        help="Continue to test.py when train rc is non-zero but best_model.pt exists.",
+    )
     args = parser.parse_args()
 
     profiles = parse_profiles(args.profiles)
@@ -190,9 +196,13 @@ def main() -> None:
                 t0 = time.time()
                 train_rc, _ = run_cmd(train_cmd, capture=False, env=env)
                 train_sec = time.time() - t0
+                run_dir = results_dir / run_name
+                model_exists = (run_dir / "best_model.pt").exists()
 
-                if train_rc != 0:
-                    print(f"  train failed rc={train_rc}, skipping test")
+                if train_rc != 0 and not (
+                    args.allow_nonzero_train_rc_if_model_exists and model_exists
+                ):
+                    print(f"  train failed rc={train_rc}, skipping test (model_exists={model_exists})")
                     rows.append(
                         {
                             "profile": profile,
@@ -207,6 +217,10 @@ def main() -> None:
                         }
                     )
                     continue
+                if train_rc != 0 and model_exists:
+                    print(
+                        f"  train returned rc={train_rc} but best_model.pt exists; continuing to test."
+                    )
 
                 test_cmd = [
                     "python", "-u", "test.py",
