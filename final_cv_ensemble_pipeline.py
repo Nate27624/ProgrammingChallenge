@@ -22,6 +22,7 @@ from pathlib import Path
 
 
 def parse_ints(raw: str) -> list[int]:
+    """Parse comma-separated integer seeds."""
     out = []
     for x in raw.split(","):
         x = x.strip()
@@ -33,6 +34,7 @@ def parse_ints(raw: str) -> list[int]:
 
 
 def run(cmd: list[str], env: dict[str, str] | None = None) -> int:
+    """Run a subprocess command and return its exit code."""
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
@@ -42,6 +44,7 @@ def run(cmd: list[str], env: dict[str, str] | None = None) -> int:
 
 
 def main() -> None:
+    """Execute end-to-end CV sweep, rank folds, and build final ensemble."""
     p = argparse.ArgumentParser(description="Run CV over seeds and build final ensemble checkpoint.")
     p.add_argument("--results_dir", type=str, default="results")
     p.add_argument("--base_name", type=str, default="final_cv")
@@ -107,6 +110,7 @@ def main() -> None:
     if not fold_rows:
         raise RuntimeError("No valid fold models found to ensemble.")
 
+    # Rank by best fold validation F1 and keep top-k as ensemble members.
     fold_rows.sort(reverse=True)
     top_runs = [r for _, r in fold_rows[: args.top_k_models]]
     print("Top runs selected for ensemble:")

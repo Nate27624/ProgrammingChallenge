@@ -23,6 +23,7 @@ import torch
 
 
 def run_cmd(cmd: list[str], env: dict[str, str] | None = None) -> int:
+    """Run one command with optional env overrides and return exit code."""
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
@@ -31,6 +32,7 @@ def run_cmd(cmd: list[str], env: dict[str, str] | None = None) -> int:
 
 
 def main() -> None:
+    """Run train.py across all folds and persist per-fold + aggregate metrics."""
     parser = argparse.ArgumentParser(description="Run stratified K-fold CV using train.py.")
     parser.add_argument("--base_team_name", type=str, required=True)
     parser.add_argument("--num_folds", type=int, default=5)
@@ -65,6 +67,7 @@ def main() -> None:
         f"Starting CV: base_team_name={args.base_team_name} "
         f"num_folds={args.num_folds} seed={args.seed}"
     )
+    # train_args is passed as one quoted string; split it into argv tokens.
     base = shlex.split(args.train_args)
     for fold_idx in range(args.num_folds):
         team_name = f"{args.base_team_name}_fold{fold_idx}"
@@ -100,6 +103,7 @@ def main() -> None:
         best_val_loss = None
         epochs_done = None
 
+        # Read fold metrics from checkpoint so interrupted runs still count.
         if ckpt_path.exists():
             ckpt = torch.load(ckpt_path, map_location="cpu")
             best_val_f1 = float(ckpt.get("best_val_f1", float("nan")))

@@ -10,6 +10,13 @@ from dataloader import EMOTION_LABELS
 
 
 def _resolve_mamba_block_factory():
+    """Return a callable that builds one Mamba block from available backends.
+
+    Resolution order:
+    1) local minimal implementation (`mamba_minimal.py`)
+    2) official `mamba_ssm`
+    3) `mambapy` fallback
+    """
     try:
         from mamba_minimal import MambaMinimalBlock  # type: ignore
 
@@ -20,6 +27,7 @@ def _resolve_mamba_block_factory():
         pass
 
     try:
+        # Preferred package backend when installed.
         from mamba_ssm import Mamba  # type: ignore
         return lambda d_model, d_state, d_conv, expand: Mamba(
             d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand

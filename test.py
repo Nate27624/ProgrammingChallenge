@@ -79,6 +79,7 @@ def evaluate_ensemble(models, loader, device):
 
 
 def build_model(model_name, model_config, in_channels, n_features, device):
+    """Construct the exact model architecture described by saved norm_stats."""
     if model_name == "mamba":
         model = BidirectionalMambaSER(
             in_channels=in_channels,
@@ -194,6 +195,7 @@ def save_submission(team_name, clip_ids, preds, results_dir):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main(args):
+    """Load artifacts, run evaluation, log metrics, and emit submission CSV."""
     device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     model_path  = results_dir / "best_model.pt"
@@ -267,6 +269,7 @@ def main(args):
     # Load model
     in_channels = 3 if include_deltas else 1
     ckpt = torch.load(model_path, map_location="cpu")
+    # Ensemble checkpoints contain multiple full member state dicts.
     if (
         model_name == "ensemble"
         and isinstance(ckpt, dict)
@@ -288,6 +291,7 @@ def main(args):
         print(f"Ensemble loaded from : {model_path} (members={len(ensemble_models)})")
         preds, labels = evaluate_ensemble(ensemble_models, test_loader, device)
     else:
+        # Standard single-model checkpoint path.
         model = build_model(model_name, model_config, in_channels, n_features, device)
         if isinstance(ckpt, dict) and "state_dict" in ckpt and "checkpoint_type" in ckpt:
             model.load_state_dict(ckpt["state_dict"])

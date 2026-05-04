@@ -203,6 +203,7 @@ class SAM(torch.optim.Optimizer):
 
 
 def _extract_train_labels(loader) -> list[int]:
+    """Extract integer class labels from a DataLoader/Subset for weighting."""
     dataset = loader.dataset
     if hasattr(dataset, "indices") and hasattr(dataset, "dataset"):
         base = dataset.dataset
@@ -213,6 +214,7 @@ def _extract_train_labels(loader) -> list[int]:
 
 
 def build_class_weights(train_labels: list[int], device: torch.device) -> torch.Tensor:
+    """Create inverse-frequency class weights normalized by class count."""
     labels = torch.tensor(train_labels, dtype=torch.long)
     num_classes = int(labels.max().item()) + 1
     counts = torch.bincount(labels, minlength=num_classes).float().clamp_min(1.0)
@@ -226,6 +228,7 @@ def build_lr_lambda(
     warmup_epochs: int,
     min_lr_ratio: float,
 ):
+    """Build epoch->lr_multiplier schedule for warmup/invsqrt/cosine modes."""
     warmup_epochs = max(1, warmup_epochs)
 
     if schedule_type == "warmup_invsqrt":
@@ -252,6 +255,7 @@ def build_lr_lambda(
 
 
 def set_global_seed(seed: int) -> None:
+    """Set all RNG seeds used by this training process."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -466,6 +470,7 @@ def validate(model, loader, criterion, device):
 # ── Loss curve plotting ────────────────────────────────────────────────────────
 def plot_curves(train_losses, val_losses, train_accs, val_accs,
                 save_path, stopped_epoch=None):
+    """Save side-by-side loss/accuracy curves for post-run inspection."""
     epochs = range(1, len(train_losses) + 1)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -503,6 +508,7 @@ def plot_curves(train_losses, val_losses, train_accs, val_accs,
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main(args):
+    """Main training entrypoint: data, model, optimization, logging, artifacts."""
     config = CONFIG.copy()
     config["model_name"] = args.model_name
     config["feature_type"] = args.feature_type
@@ -841,10 +847,12 @@ def main(args):
             model, val_loader, criterion, device
         )
         if config["use_swa"] and swa_model is not None and swa_scheduler is not None and epoch >= config["swa_start_epoch"]:
+            # Once SWA starts, SWALR controls LR updates.
             swa_model.update_parameters(model)
             swa_scheduler.step()
             swa_updates += 1
         elif config["scheduler_type"] == "plateau":
+            # Plateau needs validation loss feedback.
             scheduler.step(val_loss)
         else:
             scheduler.step()

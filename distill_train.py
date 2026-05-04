@@ -27,6 +27,7 @@ from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
 
 
 def set_seed(seed: int) -> None:
+    """Set python/numpy/torch RNG seeds for reproducible distillation runs."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -35,6 +36,7 @@ def set_seed(seed: int) -> None:
 
 
 def build_model(model_name: str, cfg: dict, in_channels: int, n_features: int, device: torch.device):
+    """Instantiate a model from a compact config dictionary."""
     if model_name == "mamba":
         model = BidirectionalMambaSER(
             in_channels=in_channels,
@@ -70,6 +72,7 @@ def build_model(model_name: str, cfg: dict, in_channels: int, n_features: int, d
 
 
 def load_teacher(results_dir: Path, run_name: str, device: torch.device):
+    """Load one teacher model and metadata from results/<run_name>/."""
     run_dir = results_dir / run_name
     stats = torch.load(run_dir / "norm_stats.pt", map_location="cpu")
     cfg = stats.get("model_config", {})
@@ -91,6 +94,7 @@ def load_teacher(results_dir: Path, run_name: str, device: torch.device):
 
 
 def validate(model, loader, device):
+    """Evaluate model on validation loader and return (loss, acc, weighted_f1)."""
     model.eval()
     preds_all, labels_all = [], []
     total_loss = 0.0
@@ -111,6 +115,7 @@ def validate(model, loader, device):
 
 
 def main():
+    """Run KD training for one student from one or more frozen teacher models."""
     p = argparse.ArgumentParser(description="Knowledge distillation trainer.")
     p.add_argument("--data_dir", type=str, default="dataset")
     p.add_argument("--results_dir", type=str, default="results")
@@ -148,6 +153,8 @@ def main():
         raise ValueError("No teacher runs provided.")
 
     teachers = [load_teacher(results_dir, n, device) for n in teacher_names]
+    # Distillation assumes a shared input representation across teachers so a
+    # single student input pipeline can be used.
     base = teachers[0]
     for t in teachers[1:]:
         if (
@@ -211,10 +218,12 @@ def main():
                 t_logits = []
                 for t in teachers:
                     t_logits.append(t["model"](specs))
+                # Mean teacher logits = simple, stable multi-teacher fusion.
                 teacher_logits = torch.stack(t_logits, dim=0).mean(dim=0)
 
             s_logits = student(specs)
             ce = F.cross_entropy(s_logits, labels)
+            # KD term: student matches softened teacher distribution.
             kd = F.kl_div(
                 F.log_softmax(s_logits / T, dim=1),
                 F.softmax(teacher_logits / T, dim=1),

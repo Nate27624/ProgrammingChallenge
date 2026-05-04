@@ -17,10 +17,12 @@ import torch
 
 
 def parse_list(raw: str) -> list[str]:
+    """Parse comma-separated run names, trimming whitespace and empties."""
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 def main() -> None:
+    """Create one inference-ready ensemble checkpoint from multiple run folders."""
     p = argparse.ArgumentParser(description="Create a single-file ensemble checkpoint.")
     p.add_argument("--results_dir", type=str, default="results")
     p.add_argument("--run_names", type=str, required=True, help="Comma-separated run names under results/")
@@ -43,6 +45,8 @@ def main() -> None:
             raise FileNotFoundError(f"Missing best_model.pt/norm_stats.pt for run: {run_name}")
 
         stats = torch.load(stats_path, map_location="cpu")
+        # All members must share feature extraction settings so a single
+        # test-time DataLoader/normalization is valid for the whole ensemble.
         sig = (
             stats.get("feature_type", "mel"),
             int(stats.get("n_features", 64)),
@@ -68,6 +72,8 @@ def main() -> None:
     out_dir = results_dir / args.team_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # We store full member state dicts in a single artifact so test.py can
+    # load and run ensemble inference from one --team_name directory.
     ensemble_ckpt = {
         "checkpoint_type": "ensemble_v1",
         "members": members,
