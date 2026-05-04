@@ -38,7 +38,7 @@ from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
                         SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
 from baseline import BaselineLSTM
-from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
+from model import CNNBiLSTMAttentionSER
 from wandb_compat import wandb
 
 
@@ -83,21 +83,9 @@ def evaluate_ensemble(models, loader, device):
 def build_model(model_name, model_config, in_channels, n_features, device):
     """Construct the exact model architecture described by saved norm_stats."""
     if model_name == "mamba":
-        model = BidirectionalMambaSER(
-            in_channels=in_channels,
-            n_features=n_features,
-            cnn_channels=int(model_config.get("cnn_channels", 64)),
-            d_model=int(model_config.get("mamba_d_model", 128)),
-            d_state=int(model_config.get("mamba_d_state", 32)),
-            d_conv=int(model_config.get("mamba_d_conv", 4)),
-            expand=int(model_config.get("mamba_expand", 2)),
-            num_layers=int(model_config.get("num_layers", 2)),
-            dropout=float(model_config.get("dropout", 0.2)),
-            frontend_type=str(model_config.get("frontend_type", "basic_cnn")),
-            fusion_type=str(model_config.get("fusion_type", "concat")),
-            pooling_type=str(model_config.get("pooling_type", "meanmax")),
-        )
-    elif model_name == "bilstm_attention":
+        print("Warning: mamba model metadata detected; mapping to bilstm_attention.")
+        model_name = "bilstm_attention"
+    if model_name == "bilstm_attention":
         model = CNNBiLSTMAttentionSER(
             in_channels=in_channels,
             n_features=n_features,

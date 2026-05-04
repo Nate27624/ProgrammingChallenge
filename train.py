@@ -38,13 +38,13 @@ from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 
 from dataloader import get_dataloaders, N_MELS, N_MFCC
 from baseline import BaselineLSTM
-from model import BidirectionalMambaSER, CNNBiLSTMAttentionSER
+from model import CNNBiLSTMAttentionSER
 from wandb_compat import wandb
 
 
 # ── Default hyperparameters ────────────────────────────────────────────────────
 CONFIG = {
-    "model_name": "mamba",
+    "model_name": "bilstm_attention",
     "feature_type": "mfcc",
     "n_features": N_MFCC,
     "hidden_size":   128,
@@ -511,6 +511,9 @@ def main(args):
     """Main training entrypoint: data, model, optimization, logging, artifacts."""
     config = CONFIG.copy()
     config["model_name"] = args.model_name
+    if config["model_name"] == "mamba":
+        print("Warning: mamba model is deprecated/removed; using bilstm_attention instead.")
+        config["model_name"] = "bilstm_attention"
     config["feature_type"] = args.feature_type
     if args.n_features is None:
         config["n_features"] = N_MFCC if args.feature_type == "mfcc" else N_MELS
@@ -670,22 +673,7 @@ def main(args):
 
     # ── Model, optimiser, scheduler ───────────────────────────────────────────
     in_channels = 3 if config["include_deltas"] else 1
-    if config["model_name"] == "mamba":
-        model = BidirectionalMambaSER(
-            in_channels=in_channels,
-            n_features=config["n_features"],
-            cnn_channels=config["cnn_channels"],
-            d_model=config["mamba_d_model"],
-            d_state=config["mamba_d_state"],
-            d_conv=config["mamba_d_conv"],
-            expand=config["mamba_expand"],
-            num_layers=config["num_layers"],
-            dropout=config["dropout"],
-            frontend_type=config["frontend_type"],
-            fusion_type=config["fusion_type"],
-            pooling_type=config["pooling_type"],
-        ).to(device)
-    elif config["model_name"] == "bilstm_attention":
+    if config["model_name"] == "bilstm_attention":
         model = CNNBiLSTMAttentionSER(
             in_channels=in_channels,
             n_features=config["n_features"],
