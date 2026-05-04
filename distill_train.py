@@ -6,6 +6,14 @@ Train a single student model via knowledge distillation from multiple teacher ru
 Teacher runs must contain:
   results/<run_name>/best_model.pt
   results/<run_name>/norm_stats.pt
+
+Implementation notes:
+  - Teachers are frozen (`eval()` + no_grad), only the student is optimized.
+  - Multi-teacher distillation is done by averaging teacher logits.
+  - Final objective is a weighted sum of:
+      1) hard-label cross-entropy
+      2) soft-label KL divergence (temperature-scaled)
+  - We still monitor validation weighted F1 and early-stop on that signal.
 """
 
 from __future__ import annotations
@@ -36,7 +44,12 @@ def set_seed(seed: int) -> None:
 
 
 def build_model(model_name: str, cfg: dict, in_channels: int, n_features: int, device: torch.device):
-    """Instantiate a model from a compact config dictionary."""
+    """Instantiate a model from a compact config dictionary.
+
+    This helper is shared by:
+      - teacher loading (where architecture comes from teacher metadata)
+      - student creation (where architecture comes from CLI args)
+    """
     if model_name == "mamba":
         # Kept for backward compatibility when loading legacy teacher checkpoints.
         # New student runs should use bilstm_attention (mamba is no longer in use).
@@ -76,6 +89,8 @@ def build_model(model_name: str, cfg: dict, in_channels: int, n_features: int, d
 def load_teacher(results_dir: Path, run_name: str, device: torch.device):
     """Load one teacher model and metadata from results/<run_name>/."""
     run_dir = results_dir / run_name
+    # `norm_stats.pt` is the canonical source for both preprocessing metadata
+    # and the original model architecture/config used during training.
     stats = torch.load(run_dir / "norm_stats.pt", map_location="cpu")
     cfg = stats.get("model_config", {})
     model_name = stats.get("model_name", "baseline")
@@ -83,6 +98,7 @@ def load_teacher(results_dir: Path, run_name: str, device: torch.device):
     n_features = int(stats.get("n_features", N_MFCC if feature_type == "mfcc" else N_MELS))
     include_deltas = bool(stats.get("include_deltas", False))
     model = build_model(model_name, cfg, 3 if include_deltas else 1, n_features, device)
+    # Teachers are inference-only here; we load best checkpoints and freeze.
     model.load_state_dict(torch.load(run_dir / "best_model.pt", map_location=device))
     model.eval()
     return {
@@ -106,6 +122,8 @@ def validate(model, loader, device):
             specs = specs.to(device)
             labels = labels.to(device)
             logits = model(specs)
+            # Validation uses standard CE with hard labels so metrics are
+            # comparable with non-distillation training runs.
             loss = F.cross_entropy(logits, labels)
             total_loss += loss.item() * specs.size(0)
             n += specs.size(0)
@@ -152,6 +170,9 @@ def main():
     p.add_argument("--fold_index", type=int, default=-1, help="0-based fold index for CV mode.")
     args = p.parse_args()
 
+    # ------------------------------------------------------------
+    # 1) Global setup
+    # ------------------------------------------------------------
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     results_dir = Path(args.results_dir)
@@ -160,10 +181,15 @@ def main():
     if args.num_folds > 1 and args.fold_index < 0:
         raise ValueError("When --num_folds > 1, you must set --fold_index >= 0.")
 
+    # Teacher run names come in as a CSV string so this script can be used
+    # directly from shell loops.
     teacher_names = [x.strip() for x in args.teacher_runs.split(",") if x.strip()]
     if not teacher_names:
         raise ValueError("No teacher runs provided.")
 
+    # ------------------------------------------------------------
+    # 2) Load all teachers and enforce input compatibility
+    # ------------------------------------------------------------
     teachers = [load_teacher(results_dir, n, device) for n in teacher_names]
     # Distillation assumes a shared input representation across teachers so a
     # single student input pipeline can be used.
@@ -176,6 +202,9 @@ def main():
         ):
             raise ValueError("All teachers must share feature_type/n_features/include_deltas.")
 
+    # ------------------------------------------------------------
+    # 3) Build data loaders using the teacher feature signature
+    # ------------------------------------------------------------
     train_loader, val_loader, _test_loader, mean, std = get_dataloaders(
         data_dir=args.data_dir,
         val_split=0.15,
@@ -196,6 +225,9 @@ def main():
         fold_index=(args.fold_index if args.fold_index >= 0 else None),
     )
 
+    # ------------------------------------------------------------
+    # 4) Create student + optimizer/scheduler
+    # ------------------------------------------------------------
     student_cfg = {
         "hidden_size": args.student_hidden_size,
         "num_layers": args.student_num_layers,
@@ -207,6 +239,7 @@ def main():
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=4)
 
+    # Track best validation checkpoint by weighted F1 (loss as tie-breaker).
     best_f1 = -1.0
     best_loss = float("inf")
     bad_epochs = 0
@@ -217,6 +250,9 @@ def main():
     print(f"Teachers: {teacher_names}")
     print(f"Student: {args.student_model}")
 
+    # ------------------------------------------------------------
+    # 5) Training loop
+    # ------------------------------------------------------------
     for epoch in range(args.num_epochs):
         student.train()
         tr_loss = 0.0
@@ -226,6 +262,8 @@ def main():
         for specs, labels in pbar:
             specs = specs.to(device)
             labels = labels.to(device)
+            # Teacher forward passes are always no_grad to minimize memory
+            # and ensure teachers remain fixed.
             with torch.no_grad():
                 t_logits = []
                 for t in teachers:
@@ -234,6 +272,7 @@ def main():
                 teacher_logits = torch.stack(t_logits, dim=0).mean(dim=0)
 
             s_logits = student(specs)
+            # Hard target term keeps the student anchored to ground truth.
             ce = F.cross_entropy(s_logits, labels)
             # KD term: student matches softened teacher distribution.
             kd = F.kl_div(
@@ -241,6 +280,8 @@ def main():
                 F.softmax(teacher_logits / T, dim=1),
                 reduction="batchmean",
             ) * (T * T)
+            # Final distillation objective:
+            #   alpha=1.0 -> pure KD, alpha=0.0 -> pure CE.
             loss = alpha * kd + (1.0 - alpha) * ce
 
             optimizer.zero_grad()
@@ -253,6 +294,7 @@ def main():
 
         tr_loss /= max(1, tr_n)
         tr_acc = tr_correct / max(1, tr_n)
+        # Validation is on the student only.
         val_loss, val_acc, val_f1 = validate(student, val_loader, device)
         scheduler.step(val_loss)
         lr = optimizer.param_groups[0]["lr"]
@@ -262,6 +304,9 @@ def main():
             f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f} lr={lr:.2e}"
         )
 
+        # Model selection policy:
+        #   1) better val_f1 wins
+        #   2) if val_f1 ties, lower val_loss wins
         better = val_f1 > best_f1 + 1e-6 or (abs(val_f1 - best_f1) <= 1e-6 and val_loss < best_loss)
         if better:
             best_f1 = val_f1
@@ -275,7 +320,11 @@ def main():
                 print(f"Early stopping at epoch {epoch+1}")
                 break
 
-    # Save normalization and model config for test.py compatibility
+    # ------------------------------------------------------------
+    # 6) Save artifacts in test.py-compatible format
+    # ------------------------------------------------------------
+    # We save normalization + model metadata exactly like train.py so test.py
+    # can evaluate distilled runs with no special-case logic.
     torch.save(
         {
             "mean": mean,

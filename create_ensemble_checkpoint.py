@@ -5,6 +5,12 @@ Bundle multiple trained runs into one ensemble checkpoint file:
   results/<team_name>/best_model.pt
 
 The bundled checkpoint is compatible with test.py (checkpoint_type=ensemble_v1).
+
+Why this exists:
+  - The project expects a single directory under `results/<team_name>/`.
+  - We still want ensemble performance, so this script packs multiple model
+    checkpoints into one `best_model.pt` container.
+  - `test.py` detects this container and runs averaged-logit inference.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ def main() -> None:
     if not run_names:
         raise ValueError("No run_names provided.")
 
+    # `members` will be serialized directly inside the ensemble checkpoint.
     members = []
     base_sig = None
     base_stats = None
@@ -41,6 +48,9 @@ def main() -> None:
         run_dir = results_dir / run_name
         model_path = run_dir / "best_model.pt"
         stats_path = run_dir / "norm_stats.pt"
+        # Every member run must have both artifacts:
+        #   - best_model.pt   (weights)
+        #   - norm_stats.pt   (feature preprocessing metadata)
         if not model_path.exists() or not stats_path.exists():
             raise FileNotFoundError(f"Missing best_model.pt/norm_stats.pt for run: {run_name}")
 
@@ -53,13 +63,18 @@ def main() -> None:
             bool(stats.get("include_deltas", False)),
         )
         if base_sig is None:
+            # First model defines the canonical input signature.
             base_sig = sig
             base_stats = stats
         elif sig != base_sig:
+            # Mixed feature signatures would invalidate ensemble inference
+            # because one test dataloader cannot satisfy all models.
             raise ValueError(
                 f"Incompatible feature signature for {run_name}: {sig} != {base_sig}"
             )
 
+        # Member payload keeps enough info for `test.py` to reconstruct each
+        # model class and instantiate it before loading its state dict.
         member = {
             "run_name": run_name,
             "model_name": stats.get("model_name", "baseline"),
@@ -80,6 +95,8 @@ def main() -> None:
     }
     torch.save(ensemble_ckpt, out_dir / "best_model.pt")
 
+    # norm_stats for an ensemble is still required because test.py uses it to
+    # build features (MFCC/Mel, deltas, normalization) before any model forward.
     norm_stats = {
         "mean": base_stats["mean"],
         "std": base_stats["std"],

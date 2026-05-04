@@ -67,6 +67,8 @@ def evaluate_ensemble(models, loader, device):
     with torch.no_grad():
         for specs, labels in loader:
             specs = specs.to(device)
+            # Logit averaging is used instead of majority voting because it
+            # preserves confidence information from each member.
             logits_sum = None
             for model in models:
                 logits = model(specs)
@@ -275,6 +277,12 @@ def main(args):
         and isinstance(ckpt, dict)
         and ckpt.get("checkpoint_type") == "ensemble_v1"
     ):
+        # ------------------------------------------------------------
+        # Ensemble path:
+        #   1) instantiate each member architecture
+        #   2) load each member state dict
+        #   3) evaluate with averaged logits
+        # ------------------------------------------------------------
         members = ckpt.get("members", [])
         ensemble_models = []
         for member in members:
@@ -292,6 +300,9 @@ def main(args):
         preds, labels = evaluate_ensemble(ensemble_models, test_loader, device)
     else:
         # Standard single-model checkpoint path.
+        # Supports both:
+        #   - raw state_dict checkpoints
+        #   - wrapped dict checkpoints containing `state_dict`
         model = build_model(model_name, model_config, in_channels, n_features, device)
         if isinstance(ckpt, dict) and "state_dict" in ckpt and "checkpoint_type" in ckpt:
             model.load_state_dict(ckpt["state_dict"])

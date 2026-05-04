@@ -9,6 +9,10 @@ Pipeline:
 Outputs:
   results/<ensemble_team_name>/best_model.pt
   results/<ensemble_team_name>/norm_stats.pt
+
+This script is intentionally orchestration-only:
+  - it does not define model/training logic itself
+  - it composes existing scripts and standardizes the sequence
 """
 
 from __future__ import annotations
@@ -57,6 +61,9 @@ def main() -> None:
     p.add_argument("--cuda_alloc_conf", type=str, default="max_split_size_mb:64")
     args = p.parse_args()
 
+    # ------------------------------------------------------------
+    # 1) Parse inputs and run per-seed CV jobs
+    # ------------------------------------------------------------
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     seeds = parse_ints(args.seeds)
@@ -82,10 +89,14 @@ def main() -> None:
             "--train_args",
             args.train_args,
         ]
+        # Every seed gets its own CV namespace so summaries do not overwrite.
         rc = run(cmd)
         if rc != 0:
             print(f"Warning: CV run returned rc={rc} for seed={seed}")
 
+    # ------------------------------------------------------------
+    # 2) Collect and rank fold candidates from summary JSON files
+    # ------------------------------------------------------------
     # Collect all fold rows from summaries
     summary_dir = results_dir / "cv_summaries"
     fold_rows = []
@@ -101,6 +112,7 @@ def main() -> None:
             if f1 is None or run_name is None:
                 continue
             run_dir = results_dir / run_name
+            # Keep only runs that produced both required artifacts.
             if not (run_dir / "best_model.pt").exists():
                 continue
             if not (run_dir / "norm_stats.pt").exists():
@@ -117,6 +129,9 @@ def main() -> None:
     for i, (f1, run_name) in enumerate(fold_rows[: args.top_k_models], 1):
         print(f"  {i}. {run_name}  best_val_f1={f1:.4f}")
 
+    # ------------------------------------------------------------
+    # 3) Build a single-file ensemble bundle from top candidates
+    # ------------------------------------------------------------
     cmd = [
         "python",
         "-u",
