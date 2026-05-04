@@ -38,6 +38,8 @@ def set_seed(seed: int) -> None:
 def build_model(model_name: str, cfg: dict, in_channels: int, n_features: int, device: torch.device):
     """Instantiate a model from a compact config dictionary."""
     if model_name == "mamba":
+        # Kept for backward compatibility when loading legacy teacher checkpoints.
+        # New student runs should use bilstm_attention (mamba is no longer in use).
         model = BidirectionalMambaSER(
             in_channels=in_channels,
             n_features=n_features,
@@ -121,7 +123,17 @@ def main():
     p.add_argument("--results_dir", type=str, default="results")
     p.add_argument("--teacher_runs", type=str, required=True, help="Comma-separated run names under results/")
     p.add_argument("--team_name", type=str, default="distilled_student")
-    p.add_argument("--student_model", type=str, default="bilstm_attention", choices=["baseline", "bilstm_attention", "mamba"])
+    p.add_argument(
+        "--student_model",
+        type=str,
+        default="bilstm_attention",
+        choices=[
+            "baseline",
+            "bilstm_attention",
+            # "mamba",  # Deprecated: no longer in use for distillation student training.
+        ],
+        help="Student architecture (mamba is deprecated and no longer in active use).",
+    )
     p.add_argument("--student_hidden_size", type=int, default=192)
     p.add_argument("--student_num_layers", type=int, default=1)
     p.add_argument("--student_dropout", type=float, default=0.2)
