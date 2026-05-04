@@ -104,6 +104,24 @@ def build_profile_train_cmd(profile: str) -> list[str]:
             "--warmup_epochs", "5",
             "--min_lr_ratio", "0.01",
         ]
+    if profile == "ujwal_ce_cosine_robust":
+        return base + [
+            "--loss_type", "ce",
+            "--no_class_weighting",
+            "--label_smoothing", "0.1",
+            "--scheduler_type", "warmup_cosine",
+            "--warmup_epochs", "5",
+            "--min_lr_ratio", "0.01",
+            "--speed_perturb_prob", "0.20",
+            "--speed_perturb_min", "0.9",
+            "--speed_perturb_max", "1.1",
+            "--num_time_masks", "2",
+            "--time_mask_param", "50",
+            "--num_freq_masks", "2",
+            "--freq_mask_param", "16",
+            "--patience", "20",
+            "--patience_lr", "6",
+        ]
     if profile == "optuna_ce_mixup":
         return base + [
             "--loss_type", "ce",
@@ -139,13 +157,40 @@ def build_profile_train_cmd(profile: str) -> list[str]:
             "--swa_start_epoch", "60",
             "--swa_lr", "0.00008",
         ]
+    if profile == "sam_swa_robust":
+        return base + [
+            "--loss_type", "ce",
+            "--no_class_weighting",
+            "--label_smoothing", "0.10",
+            "--scheduler_type", "warmup_cosine",
+            "--warmup_epochs", "5",
+            "--min_lr_ratio", "0.01",
+            "--optimizer_type", "sam",
+            "--sam_rho", "0.06",
+            "--use_swa",
+            "--swa_start_epoch", "55",
+            "--swa_lr", "0.00007",
+            "--speed_perturb_prob", "0.20",
+            "--speed_perturb_min", "0.9",
+            "--speed_perturb_max", "1.1",
+            "--num_time_masks", "2",
+            "--time_mask_param", "50",
+            "--num_freq_masks", "2",
+            "--freq_mask_param", "16",
+            "--patience", "22",
+            "--patience_lr", "6",
+        ]
     raise ValueError(f"Unsupported profile: {profile}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Moonshot SER training/test sequence.")
     parser.add_argument("--base_name", type=str, default="moonshot_v1")
-    parser.add_argument("--profiles", type=str, default="ujwal_ce_cosine,optuna_ce_mixup,focal_imbalance,sam_swa")
+    parser.add_argument(
+        "--profiles",
+        type=str,
+        default="ujwal_ce_cosine_robust,sam_swa_robust,optuna_ce_mixup",
+    )
     parser.add_argument("--seeds", type=str, required=True)
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--test_dir", type=str, default="dataset/test")
@@ -153,6 +198,11 @@ def main() -> None:
     parser.add_argument("--end_epoch", type=int, default=95)
     parser.add_argument("--epoch_step", type=int, default=5)
     parser.add_argument("--top_k", type=int, default=25)
+    parser.add_argument(
+        "--skip_existing_test_log",
+        action="store_true",
+        help="Skip a profile/seed/epoch_cap point when its test log already exists.",
+    )
     parser.add_argument(
         "--allow_nonzero_train_rc_if_model_exists",
         action="store_true",
@@ -184,6 +234,10 @@ def main() -> None:
             run_name = f"{args.base_name}_{profile}_seed{seed}"
             for epoch_cap in epoch_caps:
                 job_idx += 1
+                test_log = summary_dir / f"{run_name}_e{epoch_cap}_test.log"
+                if args.skip_existing_test_log and test_log.exists():
+                    print(f"\n[{job_idx}/{total_jobs}] {run_name} epoch_cap={epoch_cap} (skipped: existing test log)")
+                    continue
                 train_cmd = build_profile_train_cmd(profile) + [
                     "--team_name", run_name,
                     "--run_name", run_name,
@@ -255,7 +309,6 @@ def main() -> None:
                         f"epoch_cap={epoch_cap}"
                     )
 
-                test_log = summary_dir / f"{run_name}_e{epoch_cap}_test.log"
                 test_log.write_text(test_out, encoding="utf-8")
 
     ranked = sorted(
