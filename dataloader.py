@@ -31,6 +31,7 @@ import torchaudio.transforms as T
 import torchaudio.functional as AF
 import pandas as pd
 import numpy as np
+import shutil
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, random_split, Subset
 
@@ -175,6 +176,31 @@ def compute_mean_std(dataset):
     return mean, std
 
 
+def _resolve_labels_csv(split_dir: Path, expected_name: str) -> Path:
+    """Resolve a labels CSV inside split_dir and create expected alias if needed."""
+    expected = split_dir / expected_name
+    if expected.exists():
+        return expected
+
+    preferred = sorted(split_dir.glob("*_labels.csv"))
+    candidates = preferred or sorted(split_dir.glob("*.csv"))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No CSV labels file found in '{split_dir}'. "
+            f"Expected '{expected_name}' or any '*.csv'."
+        )
+
+    chosen = candidates[0]
+    # Create the expected filename alias so downstream code remains consistent.
+    try:
+        shutil.copy2(chosen, expected)
+        print(f"Created labels alias: {expected} (from {chosen.name})")
+        return expected
+    except Exception:
+        print(f"Using labels file: {chosen}")
+        return chosen
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
                     num_workers=0, max_frames=MAX_FRAMES, random_seed=42,
@@ -202,6 +228,8 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     data_dir = Path(data_dir)
     train_dir = data_dir / "train"
     test_dir  = data_dir / "test"
+    train_labels_csv = _resolve_labels_csv(train_dir, "train_labels.csv")
+    test_labels_csv = _resolve_labels_csv(test_dir, "test_labels.csv")
 
     if n_features is None:
         n_features = N_MFCC if feature_type == "mfcc" else N_MELS
@@ -231,7 +259,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     # Build full training dataset (no normalisation yet) to compute stats
     full_train_raw = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
-        labels_csv = train_dir / "train_labels.csv",
+        labels_csv = train_labels_csv,
         transform  = feature_transform,
         max_frames = max_frames,
         include_deltas = include_deltas,
@@ -276,7 +304,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     # SpecAugment is applied only on the training split.
     train_dataset = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
-        labels_csv = train_dir / "train_labels.csv",
+        labels_csv = train_labels_csv,
         transform  = feature_transform,
         max_frames = max_frames,
         mean       = mean,
@@ -291,7 +319,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
     )
     val_dataset = SpeechEmotionDataset(
         audio_dir  = train_dir / "audio",
-        labels_csv = train_dir / "train_labels.csv",
+        labels_csv = train_labels_csv,
         transform  = feature_transform,
         max_frames = max_frames,
         mean       = mean,
@@ -304,7 +332,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
 
     test_dataset = SpeechEmotionDataset(
         audio_dir  = test_dir / "audio",
-        labels_csv = test_dir / "test_labels.csv",
+        labels_csv = test_labels_csv,
         transform  = feature_transform,
         max_frames = max_frames,
         mean       = mean,
