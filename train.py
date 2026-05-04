@@ -511,9 +511,6 @@ def main(args):
     """Main training entrypoint: data, model, optimization, logging, artifacts."""
     config = CONFIG.copy()
     config["model_name"] = args.model_name
-    if config["model_name"] == "mamba":
-        print("Warning: mamba model is deprecated/removed; using bilstm_attention instead.")
-        config["model_name"] = "bilstm_attention"
     config["feature_type"] = args.feature_type
     if args.n_features is None:
         config["n_features"] = N_MFCC if args.feature_type == "mfcc" else N_MELS
@@ -981,9 +978,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        choices=["baseline", "mamba", "bilstm_attention"],
-        default="mamba",
-        help="Model type to train (default: mamba).",
+        choices=["baseline", "bilstm_attention"],
+        default="bilstm_attention",
+        help="Model type to train (default: bilstm_attention).",
     )
     parser.add_argument(
         "--feature_type",
