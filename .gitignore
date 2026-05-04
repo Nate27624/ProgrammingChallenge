@@ -13,7 +13,6 @@ __pycache__/
 error.log
 
 # Project specific directories
-dataset/
 wandb/
 
 # Virtual Environments
