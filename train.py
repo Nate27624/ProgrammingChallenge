@@ -79,6 +79,8 @@ CONFIG = {
     "patience":      10,      # early stopping patience (epochs)
     "patience_lr":   5,      # ReduceLROnPlateau patience (epochs)
     "val_split":     0.15,
+    "num_folds": 0,
+    "fold_index": -1,
     "include_deltas": True,
     "specaugment": True,
     "num_time_masks": 2,
@@ -509,6 +511,8 @@ def main(args):
     config["patience"] = args.patience
     config["patience_lr"] = args.patience_lr
     config["val_split"] = args.val_split
+    config["num_folds"] = args.num_folds
+    config["fold_index"] = args.fold_index
     config["speed_perturb_prob"] = args.speed_perturb_prob
     config["speed_perturb_min"] = args.speed_perturb_min
     config["speed_perturb_max"] = args.speed_perturb_max
@@ -516,6 +520,8 @@ def main(args):
     config["specaugment_on_gpu"] = args.specaugment_on_gpu
     config["feature_cache_dir"] = args.feature_cache_dir
     config["seed"] = args.seed
+    if config["num_folds"] > 1 and config["fold_index"] < 0:
+        raise ValueError("When --num_folds > 1, you must set --fold_index >= 0.")
 
     output_dir = Path(args.results_dir) / args.team_name.replace(" ", "_")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -550,6 +556,8 @@ def main(args):
         feature_type = config["feature_type"],
         n_features = config["n_features"],
         feature_cache_dir = config["feature_cache_dir"] or None,
+        num_folds = (config["num_folds"] if config["num_folds"] and config["num_folds"] > 1 else None),
+        fold_index = (config["fold_index"] if config["fold_index"] >= 0 else None),
     )
     if config["specaugment"] and config["specaugment_on_gpu"]:
         print(
@@ -596,6 +604,8 @@ def main(args):
                 "speed_perturb_min": config["speed_perturb_min"],
                 "speed_perturb_max": config["speed_perturb_max"],
                 "seed": config["seed"],
+                "num_folds": config["num_folds"],
+                "fold_index": config["fold_index"],
             },
         },
         norm_stats_path
@@ -1190,6 +1200,18 @@ if __name__ == "__main__":
         type=float,
         default=0.15,
         help="Validation split fraction (default: 0.15).",
+    )
+    parser.add_argument(
+        "--num_folds",
+        type=int,
+        default=0,
+        help="If >1, use stratified K-fold CV with this many folds.",
+    )
+    parser.add_argument(
+        "--fold_index",
+        type=int,
+        default=-1,
+        help="Fold index for K-fold mode (0-based). Used only when --num_folds > 1.",
     )
     parser.add_argument(
         "--speed_perturb_prob",
