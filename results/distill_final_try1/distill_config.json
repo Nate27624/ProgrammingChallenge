@@ -1,0 +1,30 @@
+{
+  "team_name": "distill_final_try1",
+  "teacher_runs": [
+    "finlike_main_s2025_fold0",
+    "finlike_main_s2025_fold1",
+    "finlike_main_s2025_fold2",
+    "finlike_main_s2026_fold0",
+    "finlike_main_s3407_fold0",
+    "finlike_main_s42_fold0",
+    "finlike_main_s42_fold1",
+    "finlike_main_s42_fold2"
+  ],
+  "student_model": "bilstm_attention",
+  "student_cfg": {
+    "hidden_size": 192,
+    "num_layers": 1,
+    "dropout": 0.2,
+    "cnn_channels": 80
+  },
+  "batch_size": 32,
+  "num_epochs": 80,
+  "learning_rate": 0.0005,
+  "weight_decay": 8e-05,
+  "temperature": 2.5,
+  "alpha_kd": 0.85,
+  "best_val_f1": 0.6767111563245292,
+  "best_val_loss": 0.8711306647358877,
+  "num_folds": 3,
+  "fold_index": 0
+}
