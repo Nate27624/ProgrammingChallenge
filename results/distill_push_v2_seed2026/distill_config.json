@@ -1,0 +1,24 @@
+{
+  "team_name": "distill_push_v2_seed2026",
+  "teacher_runs": [
+    "finlike_main_s2025_fold2",
+    "finlike_main_s42_fold1"
+  ],
+  "student_model": "bilstm_attention",
+  "student_cfg": {
+    "hidden_size": 256,
+    "num_layers": 2,
+    "dropout": 0.25,
+    "cnn_channels": 96
+  },
+  "batch_size": 32,
+  "num_epochs": 120,
+  "learning_rate": 0.0004,
+  "weight_decay": 8e-05,
+  "temperature": 2.5,
+  "alpha_kd": 0.85,
+  "best_val_f1": 0.707814775616982,
+  "best_val_loss": 0.8717510408634762,
+  "num_folds": 0,
+  "fold_index": -1
+}
