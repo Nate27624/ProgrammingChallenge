@@ -39,7 +39,32 @@ from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 from dataloader import get_dataloaders, N_MELS, N_MFCC
 from baseline import BaselineLSTM
 from model import CNNBiLSTMAttentionSER
-from wandb_compat import wandb
+
+try:
+    import wandb  # type: ignore
+except Exception:
+    class _NoOpWandb:
+        @staticmethod
+        def init(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def log(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def define_metric(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def finish(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def Image(path: str):
+            return path
+
+    wandb = _NoOpWandb()
 
 
 # ── Default hyperparameters ────────────────────────────────────────────────────

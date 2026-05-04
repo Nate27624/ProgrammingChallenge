@@ -39,7 +39,41 @@ from dataloader import (SpeechEmotionDataset, EMOTION_LABELS, IDX_TO_EMOTION,
                         SAMPLE_RATE, WIN_SIZE, HOP_SIZE, N_MELS, N_MFCC, MAX_FRAMES)
 from baseline import BaselineLSTM
 from model import CNNBiLSTMAttentionSER
-from wandb_compat import wandb
+
+try:
+    import wandb  # type: ignore
+except Exception:
+    class _NoOpTable:
+        def __init__(self, columns=None):
+            self.columns = columns or []
+
+        def add_data(self, *args):
+            return None
+
+    class _NoOpPlot:
+        @staticmethod
+        def confusion_matrix(**kwargs):
+            return {}
+
+    class _NoOpWandb:
+        def __init__(self):
+            self.summary = {}
+            self.plot = _NoOpPlot()
+            self.Table = _NoOpTable
+
+        @staticmethod
+        def init(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def log(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def finish(*args, **kwargs):
+            return None
+
+    wandb = _NoOpWandb()
 
 
 # ── Artifact/config helpers ───────────────────────────────────────────────────
