@@ -34,7 +34,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, Subset
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -243,7 +243,7 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
                     num_freq_masks=2, freq_mask_param=8,
                     feature_type="mel", n_features=None,
                     speed_perturb_prob=0.0, speed_perturb_min=0.9, speed_perturb_max=1.1,
-                    feature_cache_dir=None):
+                    feature_cache_dir=None, num_folds=None, fold_index=None):
     """Build DataLoaders for train, validation, and test splits.
 
     The training set is split into train and validation subsets using
@@ -308,17 +308,28 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
         cache_tag = cache_tag,
     )
 
-    # Stratified train / validation split for stable validation signal
+    # Stratified train / validation split for stable validation signal.
+    # Optional explicit K-fold mode for robust cross-validation.
     n_total = len(full_train_raw)
     all_indices = np.arange(n_total)
     all_labels = np.array([label for _, label in full_train_raw.samples])
-    train_indices, val_indices = train_test_split(
-        all_indices,
-        test_size=val_split,
-        random_state=random_seed,
-        shuffle=True,
-        stratify=all_labels,
-    )
+    use_kfold = num_folds is not None and fold_index is not None and int(num_folds) > 1
+    if use_kfold:
+        num_folds = int(num_folds)
+        fold_index = int(fold_index)
+        if fold_index < 0 or fold_index >= num_folds:
+            raise ValueError(f"fold_index must be in [0, {num_folds - 1}], got {fold_index}")
+        skf = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=random_seed)
+        splits = list(skf.split(all_indices, all_labels))
+        train_indices, val_indices = splits[fold_index]
+    else:
+        train_indices, val_indices = train_test_split(
+            all_indices,
+            test_size=val_split,
+            random_state=random_seed,
+            shuffle=True,
+            stratify=all_labels,
+        )
     train_indices = train_indices.tolist()
     val_indices = val_indices.tolist()
     n_train = len(train_indices)
@@ -398,7 +409,10 @@ def get_dataloaders(data_dir, val_split=0.15, batch_size=64,
 
     print(f"\nDataset split:")
     print(f"  Train:      {n_train:>5} clips")
-    print(f"  Validation: {n_val:>5} clips  ({val_split*100:.0f}% of train)")
+    if use_kfold:
+        print(f"  Validation: {n_val:>5} clips  (fold {fold_index + 1}/{num_folds})")
+    else:
+        print(f"  Validation: {n_val:>5} clips  ({val_split*100:.0f}% of train)")
     print(f"  Test:       {len(test_dataset):>5} clips")
     n_channels = 3 if include_deltas else 1
     print(
